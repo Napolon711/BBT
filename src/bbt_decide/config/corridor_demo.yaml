@@ -1,0 +1,61 @@
+# ============================================================================
+# 走廊演示场景：验证"随意换地图"——走廊里自定义两个区域，中间搭一个洞，
+# 标两个对正点（各绑一侧区域），就能完整跑巡逻 + 折叠过洞。
+#
+# 走廊：x ∈ [0, 20]，y ∈ [4, 6]（中线 y = 5），中间 x = 10 处有一道带洞的墙。
+#   区域就两个：left / right（名字随意、数量随意，这就是"我定 region"）。
+#   家和 id10 在 left；id11、id12 在 right —— 从 id10 走到 id11 必须折叠过洞。
+#   再换地图/换区域名/挪洞，只改这个文件，逻辑一行不动。
+#   （要演示"不过洞"？把 enable_tunnel 改 false、删掉 regions/region 字段/tunnels，
+#    参考 plain_demo.yaml——region 与过洞是耦合的，开关关掉整套消失。）
+# ============================================================================
+enable_tunnel: true
+regions: [left, right]
+start_region: left
+
+field_to_map:
+  enabled: false
+
+safety:
+  patrol_dwell_s: 10
+  spin_w: 1.5            # 非过洞段受击旋转（过洞段恒 0）
+  ammo_home_min: 50      # 弹量 < 50 回家补给（-1 关掉弹量锁存）
+  ammo_resume_min: 150
+  odom_stale_ms: 1000   # 位姿 1 s 没更新 → 当无效（区域保记账）
+
+# 自动购买（决策层自己下单；参数含义与默认值见 decision.yaml）
+auto_buy:
+  enable: true
+  cooldown_s: 10
+
+points:
+  - {id: 1,  x: 1.0,  y: 5.0, zone: home,   region: left}
+  - {id: 10, x: 5.0,  y: 5.0, zone: patrol, region: left}
+  - {id: 11, x: 15.0, y: 5.0, zone: patrol, region: right}
+  - {id: 12, x: 19.0, y: 5.0, zone: patrol, region: right}
+
+tunnels:
+  - name: corridor_hole       # 走廊中间的洞：对正点各绑一侧区域
+    center: [10.0, 5.0]
+    align:
+    - {p: [9.0, 5.0],  region: left}
+    - {p: [11.0, 5.0], region: right}
+
+topics:
+  sim:
+    nav_goal: /goal_pose
+    nav_status: /nav_status
+    nav_cancel: /nav_cancel
+    odom: /odom
+    cmd_vel: /cmd_vel
+    chassis_mode: /move_mode
+    spin: /cmd_spin
+    fold_cmd: /gimbal_fold_cmd
+    fold_state: /gimbal_fold_state
+    referee: /referee/summary
+    op_cmd: /referee/operator_cmd
+    buy_ammo: /sentry/buy_ammo        # 自动买弹下单
+    buy_hp: /sentry/buy_hp            # 自动买血下单
+    buy_revive: /sentry/buy_revive    # 自动买复活下单
+    data_source: /sentry/data_source
+    iface_status: /sentry/iface_status

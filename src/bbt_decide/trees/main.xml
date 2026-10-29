@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<!--
+  BBT 保底决策树主树（与主工作区 trees/main.xml 同风格）。
+
+  ReactiveSequence 每 tick 从头重跑：门控失败 → 整体 FAILURE → Standby 接管。
+  过洞（TunnelCross）优先于常规导航（NavCruise）：跨区域目标必须折叠过洞，
+  绝不裸穿；与过洞无关时 TunnelCross 让位。
+
+  节点说明（逻辑全部在 planner.cpp 的纯函数里，树只做编排）：
+    IsMatchRunning  操作手指令 + 自动购买 + 比赛门控（game_progress==4）；
+                     开赛沿：切底盘模式 + 区域记账重置为 start_region
+    DecideTarget    决策树：操作手指点 → 血量/弹量锁存回家 → 巡逻轮换+换点防抖
+    TunnelCross     过洞五段状态机：入口对正点→折叠→出口对正点→展开；
+                    完成时区域记账 = 出口对正点的 region（纯记账的唯一更新点）
+    NavCruise       常规导航：换点/操作手重指点先取消再发；失败按节奏重试；
+                    空目标停车；非过洞段恒发受击旋转 spin_w
+    Standby         比赛外静默：结束沿一次性收尾（终止过洞+取消导航+停自旋），
+                    之后一条消息不发
+
+  区域没有独立节点：纯记账（开赛沿重置 + 过洞完成写出口），见 planner.cpp。
+-->
+<root BTCPP_format="4" main_tree_to_execute="Main">
+  <BehaviorTree ID="Main">
+    <ReactiveFallback>
+      <ReactiveSequence>
+        <IsMatchRunning/>
+        <DecideTarget/>
+        <ReactiveFallback>
+          <TunnelCross/>
+          <NavCruise/>
+        </ReactiveFallback>
+      </ReactiveSequence>
+      <Standby/>
+    </ReactiveFallback>
+  </BehaviorTree>
+</root>

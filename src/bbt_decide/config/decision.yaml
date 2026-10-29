@@ -1,0 +1,156 @@
+# ============================================================================
+# BBT 保底决策树配置 —— 区域、点、洞全部由人手填，换点/挪洞/换地图只改本文件。
+#
+# 坐标系：按**场地图纸系（STL）**填。若导航建图系与图纸系不重合，用
+# tools/align_map.py 解算 field_to_map（见文件末尾说明），加载时会自动把全部
+# 点搬到建图系；仿真（Arena）里桥自己做了镜像，field_to_map 保持 false 即可。
+# 单位：m。
+#
+# enable_tunnel（过洞总开关，与 region 耦合）：
+#   true  = 按 region 路由过洞（下面的 regions / 点的 region / tunnels 都要填）；
+#   false = 不过洞：regions、点的 region、tunnels **整段都可以删掉**，
+#
+# regions（区域表）：你自己定义的"场地分片"，只用于**过洞路由**，不是几何多边形。
+#   下标即区域号。
+#   本文件用 RM 五区制。换成任何地图：改这张表 + 重标 region 归属。
+#   区域判定是纯记账：开赛沿 = start_region，之后过洞完成写出口对正点的区域。
+#
+# points（点表）：
+#   id / x / y / zone(home=家, patrol=巡逻) / region(所属区域，过洞开着时必填)
+#   巡逻轮换顺序 = 本文件书写顺序；region 没绑洞路连着的区域里的点选不到。
+#   操作手可以经裁判系统指任意一个点表 id（/referee/operator_cmd），到达即恢复巡逻。
+#
+# tunnels（洞表）：每条洞两个对正点，各带 region 绑定（不分入口/出口——车在哪个
+#   区域，就从绑定该区域的对正点进洞，另一个出）。center 可选，给地图对齐工具
+#   当基准。过洞流程：导航到入口对正点 → 折叠 → 导航到出口对正点 → 展开 → 交回。
+# ============================================================================
+
+enable_tunnel: true           # 过洞总开关：false 时 region 整套不需要（见上）
+regions: [own_low, own_high, mid, enemy_low, enemy_high]
+start_region: own_low      # 开局所在区域（区域记账从这里起步）
+
+# 地图对齐（场地系 → 导航建图系，tools/align_map.py --write 自动填；仿真保持 false）
+field_to_map:
+  enabled: false
+  dx: 0.0
+  dy: 0.0
+  dyaw_deg: 0.0
+
+safety:
+  hp_home_ratio: 0.30        # 血量 < 30% → 回家
+  hp_resume_ratio: 0.60      # 回家后血量回到 60% 才参与解除锁存（双阈值防抖）
+  ammo_home_min: 50          # 弹量 < 50 发 → 同样锁存回家补给（-1 = 不按弹量回家）
+  ammo_resume_min: 150       # 回家后弹量 ≥ 150 才算恢复（血量+弹量同时恢复才出门）
+  spin_w: 1.5                # 受击旋转 rad/s：所有非过洞导航段恒转（含巡逻段），
+                             # 过洞段恒 0（云台折叠穿洞时姿态必须稳定）
+  odom_stale_ms: 1000        # 位姿 1 s 没更新 → 当无效（区域保记账，到达只认导航 success）
+  patrol_dwell_s: 15         # 巡逻：到点或待满 15 s 换下一个
+  switch_dwell_s: 2          # 换点最小驻留
+  switch_confirm_frames: 3   # 换点需连续 3 帧一致
+  gate_clear_m: 0.5          # 点离洞闸线（两对正点连线）小于 0.5 m 会被跳过
+  nav_timeout_s: 25          # 单段导航超时
+  nav_retry_s: 2             # 导航失败后隔 2 s 重试
+  fold_timeout_s: 3          # 折叠/展开确认超时
+  tunnel_retry_cooldown_s: 5 # 过洞失败后 5 s 冷却
+  in_tunnel_margin_m: 0.3    # 车离闸线中段小于 0.3 m 视为"已在洞口/洞内"
+  arrive_radius_m: 0.5       # 距点 0.5 m 内视为到达（导航没报 success 的兜底）
+
+mode_independent: 1          # 底盘模式：1 = INDEPENDENT（比赛开始沿切一次，比赛外不发）
+
+# 自动购买（决策层**自己**下单；操作手的买指令不经决策层——那是操作手和裁判
+# 客户端的事）。判定只用裁判数据 + 金币门槛 + 冷却；远程兑换有延迟，每类下单后
+# 冷却 cooldown_s 才允许重试，买没买到看裁判数据里血量/弹量涨没涨。
+# 各条写负数单独关掉那一类；enable: false 三类全关。比赛外不下单。
+auto_buy:
+  enable: true
+  ammo_min_shots: 30     # 弹量 < 30 → 买弹
+  ammo_rounds: 100       # 每次买 100 发
+  ammo_min_coins: 200    # 金币 < 200 不买弹（给自己留复活钱，权衡着改）
+  hp_ratio: 0.40         # 活着且血量 < 40% → 买血（比回家锁存 30% 高：先远程补一口）
+  hp_amount: 200         # 每次买 200 血
+  hp_min_coins: 300      # 金币 < 300 不买血
+  revive_min_coins: 200  # hp==0（=阵亡）且金币 ≥ 200 → 买复活
+  cooldown_s: 10         # 同类购买的下单间隔（等兑换到账）
+
+points:
+  # ---- 家（补给区）----
+  - {id: 1, x: 25.39, y: 13.48, zone: home, region: own_low}
+  # ---- 巡逻点（书写顺序 = 轮换顺序；跨区域由洞路由自动串联折叠过洞）----
+  - {id: 10, x: 22.69, y: 9.42, zone: patrol, region: own_low}   # 我方低地
+  - {id: 11, x: 13.27, y: 11.39, zone: patrol, region: mid}      # 中央（北）
+  - {id: 12, x: 10.20, y: 0.75, zone: patrol, region: mid}       # 中央（南）
+  - {id: 13, x: 5.37, y: 12.78, zone: patrol, region: enemy_high} # 对面高台
+
+# 6 条洞（对正点 A01–A12 与洞中心抄自主工作区 decision.yaml，Arena 实测贴合）
+tunnels:
+  - name: own_road_tunnel      # 公路隧道，南北走向
+    center: [18.68, 12.85]
+    align:
+    - {p: [18.68, 11.50], region: own_low}   # A01
+    - {p: [18.68, 14.00], region: mid}       # A02
+  - name: enemy_near_tunnel    # 敌方近高地隧道，东西走向
+    center: [12.63, 13.46]
+    align:
+    - {p: [15.50, 13.46], region: mid}       # A03
+    - {p: [11.50, 13.46], region: enemy_low} # A04
+  - name: enemy_far_tunnel     # 敌方高地隧道，东西走向
+    center: [13.98, 14.44]
+    align:
+    - {p: [15.50, 14.44], region: mid}        # A05
+    - {p: [12.50, 14.44], region: enemy_high} # A06
+  - name: enemy_road_tunnel    # 敌方公路隧道（旋转 180° 侧）
+    center: [9.32, 2.15]
+    align:
+    - {p: [9.32, 3.50], region: enemy_low}   # A07
+    - {p: [9.32, 1.00], region: mid}         # A08
+  - name: own_near_tunnel      # 我方近隧道，东西走向
+    center: [15.37, 1.54]
+    align:
+    - {p: [12.50, 1.54], region: mid}        # A09
+    - {p: [16.50, 1.54], region: own_low}    # A10
+  - name: own_far_tunnel       # 我方远隧道，东西走向
+    center: [14.02, 0.56]
+    align:
+    - {p: [12.50, 0.56], region: mid}        # A11
+    - {p: [15.50, 0.56], region: own_high}   # A12
+
+# ============================================================================
+# 话题接线表：sim / real 两套。默认与 Arena 桥（主工作区 tools/arena_ros_bridge.py）
+# 的契约一致，仿真直接用；实车话题名确认后改 real 段即可。只写要改的条目。
+# ============================================================================
+topics:
+  sim:
+    nav_goal: /goal_pose
+    nav_status: /nav_status
+    nav_cancel: /nav_cancel
+    odom: /odom
+    cmd_vel: /cmd_vel
+    chassis_mode: /move_mode
+    spin: /cmd_spin
+    fold_cmd: /gimbal_fold_cmd
+    fold_state: /gimbal_fold_state
+    referee: /referee/summary
+    op_cmd: /referee/operator_cmd     # 操作手指令（裁判系统通道）：[type, param, seq]，
+                                      # 决策只消费 type=4 指点；买类(1-3)忽略
+    buy_ammo: /sentry/buy_ammo        # 自动买弹下单
+    buy_hp: /sentry/buy_hp            # 自动买血下单
+    buy_revive: /sentry/buy_revive    # 自动买复活下单
+    data_source: /sentry/data_source
+    iface_status: /sentry/iface_status
+  real:
+    nav_goal: /goal_pose            # TO_FILL 待接口组确认（实车应为 Nav2 接口）
+    nav_status: /nav_status         # TO_FILL 待接口组确认
+    nav_cancel: /nav_cancel         # TO_FILL 待接口组确认
+    odom: /odom                     # TO_FILL 待接口组确认（实车定位输出）
+    cmd_vel: /cmd_vel               # TO_FILL 待接口组确认
+    chassis_mode: /move_mode        # TO_FILL 待接口组确认
+    spin: /cmd_spin                 # TO_FILL 待接口组确认
+    fold_cmd: /gimbal_fold_cmd      # TO_FILL 待电控确认
+    fold_state: /gimbal_fold_state  # TO_FILL 待电控确认
+    referee: /referee/summary       # TO_FILL 待裁判系统接口确认
+    op_cmd: /referee/operator_cmd   # TO_FILL 待裁判系统接口确认（操作手指令）
+    buy_ammo: /sentry/buy_ammo      # TO_FILL 自动买弹下单口（待裁判客户端/电控确认）
+    buy_hp: /sentry/buy_hp          # TO_FILL 自动买血下单口（待裁判客户端/电控确认）
+    buy_revive: /sentry/buy_revive  # TO_FILL 自动买复活下单口（待裁判客户端/电控确认）
+    data_source: /sentry/data_source
+    iface_status: /sentry/iface_status

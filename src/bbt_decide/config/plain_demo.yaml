@@ -1,0 +1,49 @@
+# ============================================================================
+# 无洞演示场景：enable_tunnel = false —— 这套车不过洞。
+#
+# region 与过洞功能耦合：开关一关，regions 表、每个点的 region 字段、tunnels 段
+# **全部不需要**（本文件就没了这三段）。所有点视为互相直连，任何目标直接发导航；
+# 血量/弹量回家锁存、操作手指点、受击旋转照常工作。
+# 哪天要过洞了：改成 true 并把 regions / region / tunnels 补回来（参考 corridor_demo.yaml）。
+# ============================================================================
+enable_tunnel: false
+
+field_to_map:
+  enabled: false
+
+safety:
+  patrol_dwell_s: 10
+  spin_w: 1.5            # 非过洞段（=本场景全部导航段）受击旋转
+  ammo_home_min: 50
+  ammo_resume_min: 150
+  odom_stale_ms: 1000
+
+# 自动购买（决策层自己下单；参数含义与默认值见 decision.yaml）
+auto_buy:
+  enable: true
+  cooldown_s: 10
+
+points:                  # 没有 region 字段——过洞关着，不需要
+  - {id: 1,  x: 1.0,  y: 5.0, zone: home}
+  - {id: 10, x: 7.0,  y: 5.0, zone: patrol}
+  - {id: 11, x: 13.0, y: 5.0, zone: patrol}
+  - {id: 12, x: 19.0, y: 5.0, zone: patrol}
+
+topics:
+  sim:
+    nav_goal: /goal_pose
+    nav_status: /nav_status
+    nav_cancel: /nav_cancel
+    odom: /odom
+    cmd_vel: /cmd_vel
+    chassis_mode: /move_mode
+    spin: /cmd_spin
+    fold_cmd: /gimbal_fold_cmd
+    fold_state: /gimbal_fold_state
+    referee: /referee/summary
+    op_cmd: /referee/operator_cmd
+    buy_ammo: /sentry/buy_ammo        # 自动买弹下单
+    buy_hp: /sentry/buy_hp            # 自动买血下单
+    buy_revive: /sentry/buy_revive    # 自动买复活下单
+    data_source: /sentry/data_source
+    iface_status: /sentry/iface_status
