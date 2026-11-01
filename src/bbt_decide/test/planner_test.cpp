@@ -51,7 +51,7 @@ static void arrive(DebugPorts& p, double x, double y)
 static int tick(DebugPorts& p, const Config& c, PlanState& plan, ExecState& ex, double dt = 0.05)
 {
   p.time_s += dt;
-  p.pose.stamp_ms = static_cast<uint32_t>(p.time_s * 1000.0);
+  p.pose.stamp_ms = static_cast<uint64_t>(p.time_s * 1000.0);
   return step(p, c, plan, ex, p.time_s);
 }
 
@@ -297,12 +297,12 @@ static void test_odom_stale()
   // odom 断流 1.5 s：位姿过期 → 半径到达不生效（导航没报 success 就不算到），不跳点
   p.time_s += 1.5;
   p.pose = {5.2, 5.0, 0.0, 0, true};  // 其实已经站进 0.5 m 半径
-  p.pose.stamp_ms = static_cast<uint32_t>((p.time_s - 1.5) * 1000.0);  // 过期时间戳
+  p.pose.stamp_ms = static_cast<uint64_t>((p.time_s - 1.5) * 1000.0);  // 过期时间戳
   step(p, c, plan, ex, p.time_s);
   CHECK(plan.cur_point == 10);
 
   // odom 恢复（时间戳新鲜）→ 半径到达生效 → 轮换下一个
-  p.pose.stamp_ms = static_cast<uint32_t>(p.time_s * 1000.0);
+  p.pose.stamp_ms = static_cast<uint64_t>(p.time_s * 1000.0);
   step(p, c, plan, ex, p.time_s);
   CHECK(plan.cur_point == 11);
 }
@@ -586,7 +586,7 @@ static void test_auto_buy()
   set_match(p, 4, 150);       // 37.5% < 40%
   tick(p, c, plan, ex);
   CHECK(p.buy_hp_calls == 1);
-  CHECK(p.buy_hp_param == 200);
+  CHECK(p.buy_hp_param == 1);
   p.time_s += 10.5;           // 冷却过了还没回血 → 再试
   tick(p, c, plan, ex);
   CHECK(p.buy_hp_calls == 2);
@@ -727,11 +727,12 @@ static void test_abort_during_tunnel()
   // 比赛结束（下降沿）→ 一次性收尾：取消导航 + 停自旋 + 终止过洞（折叠保持，
   // 还在洞口不能乱展开；不给电控发停车），之后静默；不写区域记账（中止 ≠ 已到出口）
   const int region_before = plan.current_region;
+  const int cancels_before_end = p.cancel_count;
   set_match(p, 5, 400);
   tick(p, c, plan, ex);
   CHECK(!ex.tunnel.active());
   CHECK(p.fold == kFoldFolded);
-  CHECK(p.cancel_count == 1);       // 恰好一次取消，不刷屏
+  CHECK(p.cancel_count == cancels_before_end + 1); // 结束沿只新增一次取消
   CHECK(p.stop_count == 0);         // 比赛外停车不发消息（取消导航后底盘自己停）
   CHECK(p.spin_last_w == 0.0);      // 我们开的自旋我们关掉
   CHECK(plan.current_region == region_before);
@@ -957,7 +958,7 @@ static void test_config_load()
   CHECK(c.revive_buy_min_coins == 250);
   CHECK(std::fabs(c.buy_cooldown_s - 15.0) < 1e-9);
   CHECK(c.ammo_buy_min_coins == 200);   // 没写的用默认
-  CHECK(c.hp_buy_amount == 200);
+  CHECK(c.hp_buy_amount == 1);
 }
 
 // ---------------- ⑫ 几何基础 ----------------
@@ -968,6 +969,129 @@ static void test_geometry()
   CHECK(project_param({-1.0, 0.0}, a, b) < 0.0);  // A 外侧
   CHECK(project_param({5.0, 0.0}, a, b) > 1.0);   // B 外侧
   CHECK(std::fabs(dist_to_segment({2.0, 3.0}, a, b) - 3.0) < 1e-9);
+}
+
+// ---------------- 前哨争夺：开局打前哨 / 我方失守抢回 / 双占领巡逻 ----------------
+// 场景：单区域（不开过洞），点表配 home + patrol + outpost(21) + retake(20)。
+// 用例覆盖使用者口径：
+//   a. 开局（对面前哨阵地未控制、我方安好）→ 去 outpost 攻击位，attack_cmd 点名对面前哨；
+//   b. 我方前哨被打掉（hp=0，控制状态随便）→ 优先去 retake（先保家再打人）；
+//   c. 我方完全控制（hp>0 且 ctrl=0）+ 对面完全控制（ctrl=0）→ 巡逻；
+//   d. 对面前哨阵地被对面抢回（ctrl=2）→ 再去 outpost（来回抢）；
+//   e. 数据未知（-1）→ 不参与判定，巡逻；
+//   f. enable_outpost=false → 整套不存在；
+//   g. retake 点attack_cmd 自由开火（free_fire=1）。
+static void test_outpost_contest()
+{
+  Config c;
+  c.regions = {"mid"};
+  c.start_region = 0;
+  c.enable_tunnel = false;  // 单区域：纯测前哨段，不掺过洞
+  c.switch_confirm_frames = 1;
+  c.switch_dwell_s = 0.0;
+  c.patrol_dwell_s = 1.0;
+  c.points = {{1, {1.0, 5.0}, kZoneHome, 0},
+              {20, {8.0, 5.0}, kZoneRetake, 0},
+              {21, {12.0, 5.0}, kZoneOutpost, 0},
+              {10, {4.0, 5.0}, kZonePatrol, 0}};
+  DebugPorts p;
+  p.pose = {2.0, 5.0, 0.0, 0, true};
+  p.fold = kFoldUnfolded;
+  PlanState plan;
+  plan.current_region = 0;
+  ExecState ex;
+
+  // a. 开局：我方前哨安好（500 血/完全控制），对面前哨阵地在对面手里 → 打前哨
+  set_match(p, 4, 400);
+  p.ref.our_outpost_hp = 500;
+  p.ref.our_outpost_ctrl = kCtrlFull;
+  p.ref.enemy_outpost_hp = 1000;
+  p.ref.enemy_outpost_ctrl = kCtrlNone;
+  tick(p, c, plan, ex);
+  tick(p, c, plan, ex);  // 第一 tick 建目标，第二 tick 生效（switch_confirm=1）
+  CHECK(plan.cur_point == 21);
+  CHECK(p.attack_calls > 0 && p.attack_last_type == 2 && p.attack_last_id == 1);
+
+  // c. 对面阵地被我方完全控制（打掉+队友占完）→ 巡逻
+  p.ref.enemy_outpost_hp = 0;
+  p.ref.enemy_outpost_ctrl = kCtrlFull;
+  tick(p, c, plan, ex);
+  tick(p, c, plan, ex);
+  CHECK(plan.cur_point == 10);
+  CHECK(p.attack_last_type == 0 && p.attack_last_fire == 1);  // 巡逻段自由开火
+
+  // d. 对面把阵地抢回（ctrl 回到未控制）→ 再去 outpost（来回抢）
+  p.ref.enemy_outpost_ctrl = kCtrlNone;
+  tick(p, c, plan, ex);
+  tick(p, c, plan, ex);
+  CHECK(plan.cur_point == 21);
+
+  // b. 我方前哨被打掉（不管控制状态）→ 优先 retake
+  p.ref.our_outpost_hp = 0;
+  p.ref.our_outpost_ctrl = kCtrlFull;  // 就算阵地还标着完全控制，站没了也要去重建
+  tick(p, c, plan, ex);
+  tick(p, c, plan, ex);
+  CHECK(plan.cur_point == 20);
+  CHECK(p.attack_last_type == 0 && p.attack_last_fire == 1);  // retake 自由开火
+
+  // 我方阵地只是临时控制（站还在）→ 同样要去 retake 站满转完全
+  p.ref.our_outpost_hp = 500;
+  p.ref.our_outpost_ctrl = kCtrlTemp;
+  tick(p, c, plan, ex);
+  tick(p, c, plan, ex);
+  CHECK(plan.cur_point == 20);
+
+  // 我方完全恢复 + 对面保持未控制 → 回到打对面（先保家再打人）
+  p.ref.our_outpost_ctrl = kCtrlFull;
+  tick(p, c, plan, ex);
+  tick(p, c, plan, ex);
+  CHECK(plan.cur_point == 21);
+
+  // e. 前哨数据未知（-1，桥断流/没收到）→ 全部落到巡逻，绝不乱跑
+  p.ref.our_outpost_hp = -1;
+  p.ref.our_outpost_ctrl = kCtrlUnknown;
+  p.ref.enemy_outpost_hp = -1;
+  p.ref.enemy_outpost_ctrl = kCtrlUnknown;
+  tick(p, c, plan, ex);
+  tick(p, c, plan, ex);
+  CHECK(plan.cur_point == 10);
+
+  // f. enable_outpost=false：对面阵地明明失守也不去打（整套不存在）
+  c.enable_outpost = false;
+  p.ref.our_outpost_hp = 500;
+  p.ref.our_outpost_ctrl = kCtrlFull;
+  p.ref.enemy_outpost_hp = 1000;
+  p.ref.enemy_outpost_ctrl = kCtrlNone;
+  tick(p, c, plan, ex);
+  tick(p, c, plan, ex);
+  CHECK(plan.cur_point == 10);
+}
+
+// ---------------- 前哨争夺优先级：回家 > 前哨 > 巡逻 ----------------
+static void test_outpost_priority()
+{
+  Config c;
+  c.regions = {"mid"};
+  c.start_region = 0;
+  c.enable_tunnel = false;
+  c.switch_confirm_frames = 1;
+  c.switch_dwell_s = 0.0;
+  c.points = {{1, {1.0, 5.0}, kZoneHome, 0},
+              {20, {8.0, 5.0}, kZoneRetake, 0},
+              {21, {12.0, 5.0}, kZoneOutpost, 0}};
+  DebugPorts p;
+  p.pose = {2.0, 5.0, 0.0, 0, true};
+  PlanState plan;
+  ExecState ex;
+
+  // 双方前哨都要处理 + 血量崩了 → 回家优先（残血打不了争夺）
+  set_match(p, 4, 80);  // 80/400 = 20% < 30%
+  p.ref.our_outpost_hp = 0;
+  p.ref.our_outpost_ctrl = kCtrlNone;
+  p.ref.enemy_outpost_ctrl = kCtrlNone;
+  tick(p, c, plan, ex);
+  tick(p, c, plan, ex);
+  CHECK(plan.cur_point == 1);
 }
 
 int main()
@@ -990,6 +1114,8 @@ int main()
   test_abort_during_tunnel();
   test_refuse_unfolded_in_mouth();
   test_region_mismatch_refused();
+  test_outpost_contest();
+  test_outpost_priority();
   if (g_failures == 0)
   {
     std::printf("planner_test: 全部通过\n");

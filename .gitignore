@@ -3,3 +3,11 @@ install/
 log/
 __pycache__/
 *.pyc
+
+# Generated editor indexes and local simulation runs
+/compile_commands.json
+/.clangd
+/src/ros2_libxr/.clangd
+/runs/
+# Retained local historical dependency, not built by the current raw-frame bridge
+/src/ros2_libxr/libxr/

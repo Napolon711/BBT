@@ -56,7 +56,7 @@ struct TreeBench
   void tick(double dt = 0.05)
   {
     ports->time_s += dt;
-    ports->pose.stamp_ms = static_cast<uint32_t>(ports->time_s * 1000.0);
+    ports->pose.stamp_ms = static_cast<uint64_t>(ports->time_s * 1000.0);
     tree.tickOnce();
   }
   int acting() const
@@ -169,11 +169,12 @@ static void test_match_end_mid_tunnel()
   b.tick();  // 折叠
   CHECK(b.ports->fold == kFoldFolded);
 
+  const int cancels_before_end = b.ports->cancel_count;
   b.set_match(5, 400);  // 比赛结束 → IsMatchRunning 失败 → Standby，TunnelCross 被 halt
   b.tick();
   CHECK(!b.ctx->ex.tunnel.active());
   CHECK(b.ports->fold == kFoldFolded);  // 收尾不动折叠（还在洞口）
-  CHECK(b.ports->cancel_count == 1);    // 恰好一次取消
+  CHECK(b.ports->cancel_count == cancels_before_end + 1);    // 恰好一次取消
   CHECK(b.ports->stop_count == 0);      // 比赛外不发停车
   CHECK(b.ports->spin_last_w == 0.0);   // 我们开的自旋我们关掉
   const int goal_at_end = b.ports->goal_count;
@@ -182,7 +183,7 @@ static void test_match_end_mid_tunnel()
   b.tick();
   CHECK(b.ports->goal_count == goal_at_end);
   CHECK(b.ports->spin_count == spin_at_end);
-  CHECK(b.ports->cancel_count == 1);
+  CHECK(b.ports->cancel_count == cancels_before_end + 1);
 }
 
 // ④ 操作手指令：买类忽略（那是操作手和裁判客户端的事）；指点立即接管
@@ -225,8 +226,26 @@ static void test_operator_via_tree()
   CHECK(b.ports->buy_ammo_calls == 1);  // 冷却内不重复
 }
 
+// Production tree: same-point rescue, unusable click and idle stop must behave correctly.
+static void test_operator_at_goal_and_idle()
+{
+  auto cfg = corridor_cfg(); cfg.enable_tunnel=false;
+  TreeBench b(cfg);b.set_match(4,400);b.ports->pose={5,5,0,0,true};
+  b.ports->op={1,4,10};b.tick();
+  CHECK(b.ports->goal_count==1 && b.ctx->plan.op_goal==10);
+  b.ports->op={2,4,10};b.tick();
+  CHECK(b.ports->goal_count==2 && b.ctx->plan.op_goal==10);
+  b.tick();CHECK(b.ctx->plan.op_goal==-1);
+  b.ctx->cfg.points.clear();b.ctx->plan=PlanState{};
+  const int cancels=b.ports->cancel_count;
+  b.tick();const int stopped=b.ports->stop_count;
+  for(int i=0;i<50;++i)b.tick();
+  CHECK(b.ports->cancel_count==cancels+1 && b.ports->stop_count==stopped);
+}
+
 int main()
 {
+  test_operator_at_goal_and_idle();
   test_standby_gate();
   test_corridor_flow();
   test_match_end_mid_tunnel();

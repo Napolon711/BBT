@@ -6,7 +6,7 @@
 //   发布（出）：/goal_pose /nav_cancel /cmd_vel /move_mode /cmd_spin /gimbal_fold_cmd
 //               /sentry/buy_ammo /sentry/buy_hp /sentry/buy_revive（自动购买下单）
 //               /sentry/iface_status（1 Hz 数据流看板）
-// Arena 仿真数据由主工作区 tools/arena_ros_bridge.py 按同一套话题发进来——
+// Arena 仿真由 tools/run_arena.py 经 PTY/ros2_libxr 发布同一套消息——
 // 换掉桥，接上实车电控/导航/裁判，决策层一行不用改。
 // 比赛外完全静默：结束沿一次性收尾（取消导航+停自旋+终止过洞），之后不发任何消息
 //（自动买也一样，比赛外不下单）；开始沿切一次底盘模式。
@@ -17,6 +17,7 @@
 //   tick_hz     — double，20.0，决策频率，[1,200]
 //   data_source — string，"real"，"sim" = 接仿真数据（只是话题表不同）；
 //                 real 模式下一旦听到 /sentry/data_source = "sim" 立即待机（硬保护）
+//   referee_protocol — string，默认 "2027"；旧摘要仿真可显式选择 "legacy"。
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <behaviortree_cpp/bt_factory.h>
 #include <rclcpp/rclcpp.hpp>
@@ -105,11 +106,20 @@ public:
     rc.fold_state_topic = tm.fold_state;
     rc.referee_topic = tm.referee;
     rc.op_cmd_topic = tm.op_cmd;
+    rc.op_cmd_xy_topic = tm.op_cmd_xy;
     rc.buy_ammo_topic = tm.buy_ammo;
     rc.buy_hp_topic = tm.buy_hp;
     rc.buy_revive_topic = tm.buy_revive;
+    rc.attack_cmd_topic = tm.attack_cmd;
     rc.data_source_topic = tm.data_source;
     rc.mode_independent = ctx_->cfg.mode_independent;
+    const std::string referee_protocol = declare_parameter<std::string>("referee_protocol", "2027");
+    if (referee_protocol != "2027" && referee_protocol != "legacy")
+      throw std::invalid_argument("referee_protocol 只能是 2027 或 legacy");
+    if (data_source == "real" && referee_protocol != "2027")
+      throw std::invalid_argument("实车必须使用 2027 裁判协议");
+    rc.referee_2027 = referee_protocol == "2027";
+    rc.fold_stale_ms = ctx_->cfg.fold_stale_ms;
     ports_ = std::make_shared<RosPorts>(this, rc);
     ctx_->ports = ports_;
 
@@ -171,6 +181,12 @@ private:
   // 推一拍树 + 目标点变化时打一条日志。
   void tick()
   {
+    if (data_source_ == "real" && ctx_->cfg.require_map_alignment && !ctx_->cfg.field_to_map.enabled)
+    {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                          "等待 field_to_map 标定；确认恒等变换也须显式 enabled=true");
+      return;
+    }
     try
     {
       tree_.tickOnce();
@@ -178,6 +194,11 @@ private:
     catch (const std::exception& e)
     {
       timer_->cancel();  // 树挂了就停 tick，别每 50 ms 刷同一条错误
+      tree_.haltTree();
+      ports_->nav_cancel();
+      ports_->base_stop();
+      ports_->base_spin(0.0);
+      ports_->attack_cmd(0, 0, 0, 0);
       RCLCPP_ERROR(get_logger(), "tree stopped: %s", e.what());
       return;
     }
@@ -187,7 +208,8 @@ private:
     {
       const double now = ports_->now_s();
       const PointDef* p = acting >= 0 ? find_point(ctx_->cfg, acting) : nullptr;
-      if (ctx_->ex.tunnel.active())
+      if (ctx_->ex.tunnel.active() && ctx_->ex.tunnel.tunnel >= 0 &&
+          static_cast<size_t>(ctx_->ex.tunnel.tunnel) < ctx_->cfg.tunnels.size())
       {
         RCLCPP_INFO(get_logger(), "[%.1fs] 过洞中：%s → 对正点(%.2f, %.2f) → 之后去点 %d",
                     now, ctx_->cfg.tunnels[ctx_->ex.tunnel.tunnel].name.c_str(),

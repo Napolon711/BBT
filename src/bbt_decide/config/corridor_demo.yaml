@@ -53,7 +53,8 @@ topics:
     fold_cmd: /gimbal_fold_cmd
     fold_state: /gimbal_fold_state
     referee: /referee/summary
-    op_cmd: /referee/operator_cmd
+    op_cmd: /sentry/operator_point
+    op_cmd_xy: /referee/operator_cmd
     buy_ammo: /sentry/buy_ammo        # 自动买弹下单
     buy_hp: /sentry/buy_hp            # 自动买血下单
     buy_revive: /sentry/buy_revive    # 自动买复活下单

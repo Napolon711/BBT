@@ -31,8 +31,9 @@ REGION_COLORS = {'own_low': '#1f77b4', 'own_high': '#17becf', 'mid': '#2ca02c',
                  'enemy_low': '#d62728', 'enemy_high': '#ff7f0e'}
 TAB10 = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
          '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
-ZONE_MARK = {'home': 's', 'patrol': 'o'}
-ZONE_NAME = {'home': 'home', 'patrol': 'patrol'}
+ZONE_MARK = {'home': 's', 'patrol': 'o', 'outpost': '^', 'retake': 'v'}
+ZONE_NAME = {'home': 'home', 'patrol': 'patrol', 'outpost': 'outpost',
+             'retake': 'retake'}
 
 
 def region_color(regions, name):
@@ -56,7 +57,9 @@ def load(path):
                            'region': a.get('region')})
         tunnels.append({'name': t.get('name', 'tunnel'),
                         'align': aligns,
-                        'center': tuple(t['center']) if t.get('center') else None})
+                        'center': tuple(t['center']) if t.get('center') else None,
+                        'corners': [(float(c[0]), float(c[1]))
+                                    for c in t.get('corners') or []]})
     return doc, pts, tunnels
 
 
@@ -79,27 +82,34 @@ def draw(doc, pts, tunnels, out):
     ax.set_facecolor('#f2f2f2')
 
     # ---- 洞层：闸轴虚线 + 洞名 + 白芯对正点 ----
-    # 标签一律带白底半透明框：洞名沿闸轴法向**背离场地质心**一侧放（隧道都挤在
-    # 中带，向外偏才有空）；对正点标签沿闸轴**向外**放（洞两端外侧通常是空的）
+    # 洞名放折叠区矩形中心（竖矩形转 90°，白底框压住闸轴线）；矩形取 corners，
+    # 没填 corners 就退回对正点包围盒外扩 0.4 m 的示意框
     white_box = dict(facecolor='white', alpha=0.75, edgecolor='none', pad=1.0)
     import math as _m
-    all_x = [p['x'] for p in pts] + [a['p'][0] for t in tunnels for a in t['align']]
-    all_y = [p['y'] for p in pts] + [a['p'][1] for t in tunnels for a in t['align']]
-    gx, gy = sum(all_x) / len(all_x), sum(all_y) / len(all_y)   # 场地质心
     for t in tunnels:
         if len(t['align']) != 2:
             continue
         (x0, y0), (x1, y1) = t['align'][0]['p'], t['align'][1]['p']
+        if t['corners']:
+            cs = t['corners']
+            fx0, fx1 = min(c[0] for c in cs), max(c[0] for c in cs)
+            fy0, fy1 = min(c[1] for c in cs), max(c[1] for c in cs)
+            ax.add_patch(Rectangle((fx0, fy0), fx1 - fx0, fy1 - fy0, fill=True,
+                                   fc='#ff8c00', alpha=0.22, ec='#d2691e', lw=2.0,
+                                   hatch='///', zorder=1))
+        else:
+            fx0, fx1 = min(x0, x1) - 0.4, max(x0, x1) + 0.4
+            fy0, fy1 = min(y0, y1) - 0.4, max(y0, y1) + 0.4
+            ax.add_patch(Rectangle((fx0, fy0), fx1 - fx0, fy1 - fy0,
+                                   fill=False, ec='#999', ls=':', lw=1.0, zorder=1))
+        cx, cy = t['center'] or ((x0 + x1) / 2, (y0 + y1) / 2)  # noqa: F841（画图不用了，留作调试）
         ax.plot([x0, x1], [y0, y1], '--', color='#888', lw=1.6, zorder=2)
-        cx, cy = t['center'] or ((x0 + x1) / 2, (y0 + y1) / 2)
-        ax.add_patch(Rectangle((min(x0, x1) - 0.4, min(y0, y1) - 0.4),
-                               abs(x1 - x0) + 0.8, abs(y1 - y0) + 0.8,
-                               fill=False, ec='#999', ls=':', lw=1.0, zorder=1))
-        axlen = _m.hypot(x1 - x0, y1 - y0) or 1.0
-        nx, ny = -(y1 - y0) / axlen, (x1 - x0) / axlen        # 单位法向
-        outward = 1.0 if (nx * (cx - gx) + ny * (cy - gy)) >= 0 else -1.0
-        ax.text(cx + nx * outward * 1.1, cy + ny * outward * 1.1, t['name'], fontsize=7,
-                color='#555', ha='center', va='center', bbox=white_box, zorder=5)
+        # 洞名去掉冗余后缀，竖矩形转 90°；中心若有别的元素白底框也能压住
+        label = t['name'].removesuffix('_tunnel')
+        ax.text((fx0 + fx1) / 2, (fy0 + fy1) / 2, label, fontsize=7,
+                color='#555', ha='center', va='center',
+                rotation=90 if (fy1 - fy0) > (fx1 - fx0) else 0,
+                bbox=white_box, zorder=5)
         for i, a in enumerate(t['align']):
             px, py = a['p']
             ox, oy = t['align'][1 - i]['p']
@@ -136,6 +146,9 @@ def draw(doc, pts, tunnels, out):
         handles.append(plt.Line2D([], [], marker='o', ls='none', mfc='white', mec='#333',
                                   mew=1.4, ms=8, label='align'))
         handles.append(plt.Line2D([], [], ls='--', color='#888', lw=1.6, label='gate axis'))
+        if any(t['corners'] for t in tunnels):
+            handles.append(plt.Line2D([], [], marker='s', ls='none', mfc='#ff8c00',
+                                      alpha=.4, mec='#d2691e', ms=10, label='fold region'))
     ax.legend(handles=handles, fontsize=7, ncol=2, loc='upper left', framealpha=.9)
 
     # ---- 坐标范围：点的包围盒外扩 1.5 m，网格按范围选 1/2 m ----

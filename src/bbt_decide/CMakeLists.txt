@@ -4,7 +4,8 @@ project(bbt_decide)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 导出 compile_commands.json（build/<pkg>/ 下）：编辑器/clangd 靠它解析头文件路径，
-# 没有它 VSCode 里所有 #include 都会标红。仓库根的软链接指向它。
+# 没有它 VSCode 里所有 #include 都会标红。多包工作区根的合并版由
+# tools/merge_compile_commands.py 生成（colcon build 后跑一次）。
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -17,6 +18,7 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(rm2027_interfaces REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
@@ -35,7 +37,7 @@ target_link_libraries(bbt_decide_bt PUBLIC bbt_decide_core behaviortree_cpp::beh
 
 # ROS 适配层：抽象 Ports ↔ 真实话题（本包唯一数据进出口）
 add_library(bbt_decide_ros src/ros_ports.cpp)
-ament_target_dependencies(bbt_decide_ros rclcpp std_msgs geometry_msgs nav_msgs)
+ament_target_dependencies(bbt_decide_ros rclcpp std_msgs geometry_msgs nav_msgs rm2027_interfaces)
 target_link_libraries(bbt_decide_ros bbt_decide_core)
 
 # 决策节点
@@ -63,6 +65,23 @@ if(BUILD_TESTING)
   target_compile_definitions(bbt_decide_bt_tests PRIVATE SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   target_link_libraries(bbt_decide_bt_tests bbt_decide_bt behaviortree_cpp::behaviortree_cpp)
   add_test(NAME bbt_decide_bt_test COMMAND bbt_decide_bt_tests)
+
+  add_executable(bbt_decide_regression_tests test/regression_test.cpp)
+  target_compile_definitions(bbt_decide_regression_tests PRIVATE SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(bbt_decide_regression_tests bbt_decide_core)
+  add_test(NAME bbt_decide_regression_test COMMAND bbt_decide_regression_tests)
+
+  add_executable(bbt_decide_ros_tests test/ros_ports_test.cpp)
+  target_link_libraries(bbt_decide_ros_tests bbt_decide_ros)
+  add_test(NAME bbt_decide_ros_test COMMAND bbt_decide_ros_tests)
+  set_tests_properties(bbt_decide_ros_test PROPERTIES TIMEOUT 30
+    ENVIRONMENT "ROS_DOMAIN_ID=197;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST")
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_test(NAME bbt_decide_node_test COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test/node_integration_test.py $<TARGET_FILE:bbt_decide_node>)
+  set_tests_properties(bbt_decide_node_test PROPERTIES TIMEOUT 20)
+  add_test(NAME bbt_arena_adapter_test COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/arena/test_support.py)
 endif()
 
 ament_package()

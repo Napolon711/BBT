@@ -19,20 +19,11 @@ using BT::NodeStatus;
 BT::NodeStatus tick_gate(Context& ctx)
 {
   const double now = ctx.ports->now_s();
-  handle_operator(*ctx.ports, ctx.cfg, ctx.plan);
   ctx.sense = sense(*ctx.ports, ctx.cfg, now);
+  if (ctx.sense.match_running) update_match_gate(*ctx.ports, ctx.cfg, ctx.sense, ctx.plan, ctx.ex);
+  handle_operator(*ctx.ports, ctx.cfg, ctx.plan);
   run_auto_buy(*ctx.ports, ctx.cfg, ctx.sense, ctx.plan, now);
   if (!ctx.sense.match_running) return NodeStatus::FAILURE;
-  if (!ctx.ex.match_on)
-  {
-    ctx.ex.match_on = true;
-    ctx.ex.standby_cleaned = false;
-    ctx.ports->base_set_mode(ctx.cfg.mode_independent);
-    if (ctx.cfg.enable_tunnel)
-    {
-      ctx.plan.current_region = ctx.cfg.start_region;  // 开赛沿重置区域记账
-    }
-  }
   return NodeStatus::SUCCESS;
 }
 
@@ -134,17 +125,7 @@ private:
   void onHalted() override {}
   NodeStatus step()
   {
-    if (!ctx_->ex.standby_cleaned)  // 刚从比赛切过来：收尾一次
-    {
-      ctx_->ex.tunnel.phase = TunnelRunner::kOff;
-      ctx_->ex.tunnel.tunnel = -1;
-      ctx_->ex.tunnel.after_point = -1;
-      ctx_->ports->nav_cancel();
-      ctx_->ports->base_spin(0.0);
-      ctx_->ex.applied_goal = -2;
-      ctx_->ex.match_on = false;
-      ctx_->ex.standby_cleaned = true;
-    }
+    update_match_gate(*ctx_->ports, ctx_->cfg, ctx_->sense, ctx_->plan, ctx_->ex);
     return NodeStatus::RUNNING;  // 静默等待比赛开始
   }
   std::shared_ptr<Context> ctx_;

@@ -16,10 +16,19 @@ namespace bbt_decide
 {
 namespace
 {
-// 读一个数值字段（存在且可转 double 才写进 out）。
+// 在字段读取处拒绝 NaN/Inf，保留 YAML 行号，避免它们先进入几何计算。
+double read_finite_double(const YAML::Node& node)
+{
+  const double value = node.as<double>();
+  if (!std::isfinite(value))
+    throw YAML::RepresentationException(node.Mark(), "数值必须有限（不接受 NaN/Inf）");
+  return value;
+}
+
+// 读一个数值字段（存在且可转有限 double 才写进 out）。
 void read_double(const YAML::Node& node, const char* key, double& out)
 {
-  if (node[key]) out = node[key].as<double>();
+  if (node[key]) out = read_finite_double(node[key]);
 }
 // 读一个整数字段。
 void read_int(const YAML::Node& node, const char* key, int& out)
@@ -47,9 +56,11 @@ void read_topics(const YAML::Node& node, TopicMap& t)
   read_str(node, "fold_state", t.fold_state);
   read_str(node, "referee", t.referee);
   read_str(node, "op_cmd", t.op_cmd);
+  read_str(node, "op_cmd_xy", t.op_cmd_xy);
   read_str(node, "buy_ammo", t.buy_ammo);
   read_str(node, "buy_hp", t.buy_hp);
   read_str(node, "buy_revive", t.buy_revive);
+  read_str(node, "attack_cmd", t.attack_cmd);
   read_str(node, "data_source", t.data_source);
   read_str(node, "iface_status", t.iface_status);
 }
@@ -59,6 +70,8 @@ int zone_from_str(const std::string& s)
 {
   if (s == "home") return kZoneHome;
   if (s == "patrol") return kZonePatrol;
+  if (s == "outpost") return kZoneOutpost;
+  if (s == "retake") return kZoneRetake;
   return -1;
 }
 
@@ -75,14 +88,14 @@ int region_index(const std::vector<std::string>& regions, const std::string& nam
 // 读一个 [x, y] 二元组进 out；格式不对返回 false。
 bool read_xy(const YAML::Node& node, Vec2& out)
 {
-  if (!node || node.size() != 2) return false;
-  out.x = node[0].as<double>();
-  out.y = node[1].as<double>();
+  if (!node || !node.IsSequence() || node.size() != 2) return false;
+  out.x = read_finite_double(node[0]);
+  out.y = read_finite_double(node[1]);
   return true;
 }
 }  // namespace
 
-bool load_config(const std::string& path, Config& cfg, std::string& error,
+static bool load_config_impl(const std::string& path, Config& cfg, std::string& error,
                  std::vector<std::string>& warnings)
 {
   YAML::Node root;
@@ -171,6 +184,7 @@ bool load_config(const std::string& path, Config& cfg, std::string& error,
     read_double(s, "switch_dwell_s", cfg.switch_dwell_s);
     read_int(s, "switch_confirm_frames", cfg.switch_confirm_frames);
     read_double(s, "gate_clear_m", cfg.gate_clear_m);
+    read_double(s, "op_goal_timeout_s", cfg.op_goal_timeout_s);
     read_double(s, "nav_timeout_s", cfg.nav_timeout_s);
     read_double(s, "nav_retry_s", cfg.nav_retry_s);
     read_double(s, "fold_timeout_s", cfg.fold_timeout_s);
@@ -179,6 +193,8 @@ bool load_config(const std::string& path, Config& cfg, std::string& error,
     read_double(s, "arrive_radius_m", cfg.arrive_radius_m);
   }
   read_int(root, "mode_independent", cfg.mode_independent);
+  if (root["require_map_alignment"]) cfg.require_map_alignment = root["require_map_alignment"].as<bool>();
+  if (root["safety"]) read_double(root["safety"], "fold_stale_ms", cfg.fold_stale_ms);
 
   // ---- 自动购买（决策层自己下单：阈值 + 金币门槛 + 冷却，详见 types.hpp 注释）----
   if (root["auto_buy"])
@@ -195,6 +211,14 @@ bool load_config(const std::string& path, Config& cfg, std::string& error,
     read_double(b, "cooldown_s", cfg.buy_cooldown_s);
   }
 
+  // ---- 前哨争夺段（可选）：enable 总开关 + 坐标指点吸附半径 ----
+  if (root["outpost"])
+  {
+    const auto& o = root["outpost"];
+    if (o["enable"]) cfg.enable_outpost = o["enable"].as<bool>();
+    read_double(o, "snap_m", cfg.op_snap_m);
+  }
+
   // ---- 点表：id / x / y / zone / region（region 仅过洞开着时必填），全部手填 ----
   if (root["points"])
   {
@@ -202,14 +226,14 @@ bool load_config(const std::string& path, Config& cfg, std::string& error,
     {
       PointDef p;
       p.id = it["id"].as<int>();
-      p.pos.x = it["x"].as<double>();
-      p.pos.y = it["y"].as<double>();
+      p.pos.x = read_finite_double(it["x"]);
+      p.pos.y = read_finite_double(it["y"]);
       const std::string zone = it["zone"].as<std::string>("patrol");
       p.zone = zone_from_str(zone);
       if (p.zone < 0)
       {
         error = "点 " + std::to_string(p.id) + " 的 zone 不认识: " + zone +
-                "（只有 home/patrol）";
+                "（只有 home/patrol/outpost/retake）";
         return false;
       }
       const std::string rname = it["region"].as<std::string>("");
@@ -270,7 +294,11 @@ bool load_config(const std::string& path, Config& cfg, std::string& error,
           warnings.push_back("洞 " + t.name + " 两个对正点绑了同一个区域，这条洞不会参与路由");
           t.align_region[0] = t.align_region[1] = -1;
         }
-        if (it["center"]) read_xy(it["center"], t.center);
+        if (it["center"] && !read_xy(it["center"], t.center))
+        {
+          error = "洞 " + t.name + " 的 center 必须是 [x, y]";
+          return false;
+        }
         cfg.tunnels.push_back(t);
       }
     }
@@ -308,6 +336,15 @@ bool load_config(const std::string& path, Config& cfg, std::string& error,
     };
     if (!has_zone(kZoneHome)) warnings.push_back("没配 home 点：血量低时无处可回（决策会落到停车）");
     if (!has_zone(kZonePatrol)) warnings.push_back("没配 patrol 点：平时没有巡逻目标（决策会退回家站着）");
+    if (cfg.enable_outpost)
+    {
+      if (!has_zone(kZoneOutpost))
+        warnings.push_back("前哨争夺开着但没配 outpost 点：对面前哨需要处理时只能落到巡逻"
+                           "（不打前哨请显式写 outpost.enable: false）");
+      if (!has_zone(kZoneRetake))
+        warnings.push_back("前哨争夺开着但没配 retake 点：我方前哨被打掉/失守时只能落到巡逻"
+                           "（不打前哨请显式写 outpost.enable: false）");
+    }
   }
   // 孤岛区域 / 贴闸线：只在过洞开着时才有意义（region 与闸线都是过洞的概念）
   if (cfg.enable_tunnel)
@@ -362,6 +399,64 @@ bool load_config(const std::string& path, Config& cfg, std::string& error,
     }
   }
   return true;
+}
+
+bool load_config(const std::string& path, Config& cfg, std::string& error,
+                 std::vector<std::string>& warnings)
+{
+  error.clear();
+  warnings.clear();
+  try
+  {
+    Config parsed;
+    if (!load_config_impl(path, parsed, error, warnings)) return false;
+    if (parsed.enable_auto_buy && (parsed.ammo_buy_rounds != 100 || parsed.hp_buy_amount != 1))
+    {
+      error = "auto_buy: ammo_rounds 必须为 100；hp_amount 必须为 1（一次远程回血请求）";
+      return false;
+    }
+    for (const auto& p : parsed.points)
+    {
+      if (p.id < 0 || !std::isfinite(p.pos.x) || !std::isfinite(p.pos.y))
+      { error = "points: id 必须非负，坐标必须是有限数值"; return false; }
+    }
+    // 输入虽有限，刚体变换仍可能溢出；洞与点表使用相同的结果校验。
+    for (const auto& t : parsed.tunnels)
+    {
+      for (const auto& p : {t.align[0], t.align[1], t.center})
+      {
+        if (!std::isfinite(p.x) || !std::isfinite(p.y))
+        { error = "洞 " + t.name + " 的变换后坐标必须是有限数值"; return false; }
+      }
+    }
+    if (!std::isfinite(parsed.nav_timeout_s) || parsed.nav_timeout_s <= 0 ||
+        !std::isfinite(parsed.nav_retry_s) || parsed.nav_retry_s < 0 ||
+        !std::isfinite(parsed.fold_timeout_s) || parsed.fold_timeout_s <= 0 ||
+        !std::isfinite(parsed.fold_stale_ms) || parsed.fold_stale_ms <= 0 ||
+        !std::isfinite(parsed.tunnel_retry_cooldown_s) || parsed.tunnel_retry_cooldown_s <= 0)
+    { error = "safety: 超时必须为有限正数，nav_retry_s 必须非负"; return false; }
+    if (!(parsed.hp_home_ratio >= 0 && parsed.hp_resume_ratio >= parsed.hp_home_ratio && parsed.hp_resume_ratio <= 1) ||
+        (parsed.ammo_home_min >= 0 && parsed.ammo_resume_min < parsed.ammo_home_min) ||
+        parsed.switch_confirm_frames <= 0 || !std::isfinite(parsed.odom_stale_ms) || parsed.odom_stale_ms <= 0 ||
+        !std::isfinite(parsed.op_goal_timeout_s) || parsed.op_goal_timeout_s <= 0)
+    { error = "safety: 恢复阈值不得低于触发阈值，帧数/位姿时效/指点超时必须为正"; return false; }
+    if (parsed.gate_clear_m < 0 || parsed.in_tunnel_margin_m < 0 ||
+        parsed.arrive_radius_m < 0 || parsed.op_snap_m < 0)
+    { error = "safety/outpost: gate_clear_m、in_tunnel_margin_m、arrive_radius_m、snap_m 必须非负"; return false; }
+    if (parsed.patrol_dwell_s < 0 || parsed.switch_dwell_s < 0 || parsed.buy_cooldown_s < 0)
+    { error = "safety/auto_buy: 驻留时间与购买冷却时间必须非负"; return false; }
+    if (parsed.hp_buy_ratio > 1)
+    { error = "auto_buy.hp_ratio 不得大于 1；小于等于 0 表示不自动买血"; return false; }
+    cfg = std::move(parsed);
+    return true;
+  }
+  catch (const YAML::Exception& e)
+  {
+    error = "配置字段格式错误 " + path;
+    if (!e.mark.is_null()) error += ":" + std::to_string(e.mark.line + 1);
+    error += ": " + e.msg;
+    return false;
+  }
 }
 
 }  // namespace bbt_decide

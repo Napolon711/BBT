@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rm2027_interfaces</name>
+  <version>1.0.0</version>
+  <description>
+    2027 赛季裁判系统通信协议（V1.0.0 / 20261029）对应的 ROS 2 消息定义。
+    所有字段名与单位都直接对应协议原文的字节偏移表，不做二次加工。
+    数据来源：下位机 STM32 通过 ros2_libxr 转接桥转发（原始帧 + 结构化字段）。
+  </description>
+  <maintainer email="sentry@27bt.local">27BT-UC sentry</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

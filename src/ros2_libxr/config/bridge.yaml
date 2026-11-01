@@ -1,0 +1,25 @@
+ros2_libxr_bridge:
+  ros__parameters:
+    # STM32 的 USB CDC 虚拟串口。多个 CDC 接口时用 /dev/serial/by-id/... 更稳
+    port: /dev/ttyACM0
+    # USB CDC 忽略波特率，保留参数只为兼容
+    baud: 115200
+    # 哨兵机器人 ID（7 红 / 107 蓝）。填 0 表示从 0x0201 自动识别
+    robot_id: 0
+    # 是否把每个裁判原始帧也发到 referee/raw（调试用，带宽允许就开着）
+    publish_raw: true
+    # 上位机侧话题名（决策层默认值，一般不用改）
+    cmd_vel_topic: /cmd_vel
+    move_mode_topic: /move_mode
+    spin_topic: /cmd_spin
+    fold_cmd_topic: /gimbal_fold_cmd
+    # /cmd_vel 断流后多久下发零速
+    zero_vel_timeout_ms: 200
+    # 任一必需裁判数据过期则停止摘要；摘要附带源年龄
+    referee_timeout_ms: 2000
+    # /referee/summary 发布频率
+    summary_rate_hz: 20.0
+    # 0x0120 哨兵自主决策指令的重发频率与保持时间
+    sentry_cmd_rate_hz: 5.0
+    sentry_cmd_hold_s: 3.0
+    # 雷达坐标系 → 场地系的变换。未确认前保持 NaN，桥会拒绝发布场地系坐标

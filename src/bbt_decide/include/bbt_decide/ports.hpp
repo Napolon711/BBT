@@ -32,7 +32,7 @@ struct BasePose
   double x = 0.0;         // X 坐标，单位 m；0 是默认值，不代表有效
   double y = 0.0;         // Y 坐标，单位 m；配合 valid 才有意义
   double yaw = 0.0;       // 车头朝向，单位 rad，[-pi, pi]；本版决策不用，透传
-  uint32_t stamp_ms = 0;  // 本机收到该帧的时刻（单调时钟 ms），用来判 odom 断流；0 = 没收到过
+  uint64_t stamp_ms = 0;  // 64 位单调毫秒，不在系统运行 49.7 天后回绕
   bool valid = false;     // 位姿是否可信；false 时别拿 x/y 算距离/判侧
 };
 
@@ -83,6 +83,18 @@ public:
   virtual bool fold_set(bool fold) = 0;
   // 读当前折叠状态。返回：FoldState。
   virtual int fold_state() = 0;
+
+  // ---- 自瞄意图提示（自瞄主权在电控，这里只是"建议"，电控可忽略）----
+  // target_type：0 无指定 / 1 机器人 / 2 前哨建筑 / 3 基地；target_id：type=2 时
+  // 1 = 对面前哨（约定同主工作区）。fire：1 允许开火；free_fire：1 让自瞄自由选目标。
+  // 常规导航段每 tick 重发；比赛外/待机不发（门控同其他输出口）。
+  virtual void attack_cmd(int target_type, int target_id, int fire, int free_fire)
+  {
+    (void)target_type;
+    (void)target_id;
+    (void)fire;
+    (void)free_fire;
+  }
 
   // ---- 裁判系统 ----
   // 读裁判系统快照。返回：RefereeSnapshot（比赛状态/血量/弹量等）。
@@ -156,6 +168,10 @@ public:
   int buy_hp_calls = 0;         // 自动买血下单次数
   int buy_hp_param = 0;         // 最近一次买血量
   int buy_revive_calls = 0;     // 自动买复活下单次数
+  int attack_calls = 0;         // attack_cmd 被调用的累计次数
+  int attack_last_type = -1;    // 最近一次 attack_cmd 的 target_type
+  int attack_last_id = -1;      // 最近一次 attack_cmd 的 target_id
+  int attack_last_fire = -1;    // 最近一次 attack_cmd 的 fire
 
   // 记录目标点并立刻进入 running。
   bool nav_set_goal(double x, double y) override
@@ -215,6 +231,14 @@ public:
     buy_hp_param = amount;
   }
   void buy_revive() override { ++buy_revive_calls; }
+  void attack_cmd(int target_type, int target_id, int fire, int free_fire) override
+  {
+    (void)free_fire;
+    ++attack_calls;
+    attack_last_type = target_type;
+    attack_last_id = target_id;
+    attack_last_fire = fire;
+  }
   double now_s() override { return time_s; }
 };
 

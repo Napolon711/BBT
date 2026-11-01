@@ -6,11 +6,22 @@
 //   │    之后自动恢复下面的正常决策。期间的换点不走防抖（人下了指令立即执行）
 //   ├ 1. 血量 < hp_home_ratio 或 弹量 < ammo_home_min（锁存；血量 ≥ resume 比例
 //   │    且弹量 ≥ ammo_resume_min 两个条件同时满足才解除）→ 回家
-//   └ 2. 其余情况 ────────────────────────→ 巡逻（环形轮换：
-//        到达（导航 success / 进入 arrive_radius）或驻留满 patrol_dwell_s → 下一个）
+//   ├ 2. 我方前哨：被打掉（hp=0）或前哨阵地不被我方完全控制（ctrl≠0）→ 去 retake
+//   │    点（站在我方前哨阵地的增益点上把控制权抢回来；完全控制后前哨站会重建）
+//   ├ 3. 对面前哨：前哨阵地不被我方完全控制（ctrl≠0）→ 去 outpost 攻击位
+//   │    （站在对面前哨阵地的增益点上转控制 + 打前哨站；打掉 + 完全控制即完成）
+//   └ 4. 其余情况（两个前哨阵地都被我方完全控制 / 数据未知）──→ 巡逻
+//        （环形轮换：到达（导航 success / 进入 arrive_radius）或驻留满
+//          patrol_dwell_s 换下一个）
+//
+// 前哨争夺（2/3 段）判据只有裁判数据（0x0003 前哨血量 + 0x0101 前哨阵地控制状态），
+// 不需要雷达；顺序固定"先保家再打人"（我方前哨优先于对面前哨）。数据未知（-1）的
+// 一侧不参与判定——不知道就当没事，落到巡逻，绝不因为缺数据乱跑。
+// outpost.enable: false 时 2/3 段整体不存在（没有前哨的地图用）。
 //
 // 旁路（不动目标点，每 tick 独立跑）：自动购买——弹/血低了、金币够就自己下单
 // （run_auto_buy，条件见其注释）；hp==0 自动买复活。买没买到看裁判数据涨没涨。
+// 打前哨的自瞄意图提示（attack_cmd）在执行器 nav_cruise 里按目标点 zone 发。
 //
 // 没有阵亡分支：死了下位机锁死、发什么都动不了（hp==0 只用来触发自动买复活）；
 // 低血/低弹回家的锁存在死亡期间自然保持（hp=0 也低于阈值），复活后残血→从原地
@@ -33,7 +44,7 @@
 // 过洞路由（按 region，与主工作区同款语义；不依赖任何几何猜测）：
 //   区域是用户在 yaml 里自定义的名字表（走廊可以就 left/right）。每条洞的两个
 //   对正点各自声明它服务的区域（align_region）。判定链条：
-//     车当前区域（纯记账：开赛沿 start_region + 过洞完成写出口）vs 目标点 region
+//     车当前区域（纯记账：开赛沿 start_region + 到达出口写出口）vs 目标点 region
 //       → 不同则 route_tunnels() 在"区域图"上 BFS 出要依次过的洞
 //       → 入口 = 绑定"车当前区域"的对正点，出口 = 绑定"目标区域"的对正点
 //       → 过完一条写记账区域 = 出口区域，重新评估，自动串联下一条。
@@ -62,6 +73,9 @@ double dist_to_segment(const Vec2& p, const Vec2& a, const Vec2& b);
 const PointDef* find_point(const Config& cfg, int id);
 // 找第一个指定 zone 的点（家只有一个时即"回家点"）；找不到返回 nullptr。
 const PointDef* find_point_by_zone(const Config& cfg, int zone);
+// 找第一个指定 zone 且当前区域可达、不贴闸线的点（outpost/retake 选点用）；
+// 找不到返回 nullptr（调用方落到下一段决策）。
+const PointDef* pick_zone_point(const Config& cfg, int zone, int cur_region);
 // 点是否离任一洞的闸线（两对正点连线）太近（< cfg.gate_clear_m）：太近会挡住过洞路径。
 bool too_close_to_gate(const Config& cfg, const Vec2& p);
 // 找连接区域 a 与区域 b 的洞下标（两端 align_region 恰为 {a,b}，不分前后）；
@@ -91,10 +105,31 @@ struct Sense
   Vec2 pos;                         // 当前位置，单位 m
   bool pos_valid = false;           // 位姿是否可信（新鲜且有效）
   GoalState nav_state = kGoalIdle;  // 导航目标状态
+  // ---- 前哨（2027 前哨阵地争夺；R/B 已由桥按我方颜色映射，这里只有"我方/对方"）----
+  // known = 血量及控制状态均已知：未知的一侧不参与争夺判定（不知道就当没事，别乱跑）。
+  bool our_outpost_known = false;   // 我方前哨数据是否有效
+  int our_outpost_hp = -1;          // 我方前哨站血量；0 = 被打掉（阵地易主会以 500 血重建）
+  int our_outpost_ctrl = kCtrlUnknown;  // 我方前哨阵地控制状态（kCtrl*）
+  bool enemy_outpost_known = false; // 对面前哨数据是否有效
+  int enemy_outpost_hp = -1;        // 对面前哨站血量
+  int enemy_outpost_ctrl = kCtrlUnknown;  // 对面前哨阵地控制状态
+  // ---- 兑换/复活门控（自动买用；-1 = 未知不拦）----
+  int revive_available = -1;        // 0 不可复活 / 1 可免费 / 2 可金币兑换立即复活
+  int revive_cost = -1;             // 兑换立即复活所需金币
+  int remote_ammo_pool = -1;        // 队伍 17mm 剩余可兑换数；0 = 远程兑换池空了，别下单
+  int out_of_combat = -1;           // 1 脱战 / 0 交战中（远程兑换血量要求脱战）
 };
 
 // 从 Ports 抓一帧感知（只读，不改任何状态）。
 Sense sense(Ports& ports, const Config& cfg, double now_s);
+
+// ---- 前哨争夺判定（2027 规则 5.6.2 前哨阵地；判据只有裁判数据，不需要雷达）----
+// 我方前哨是否需要处理：被打掉（hp=0），或前哨阵地不被我方完全控制（ctrl≠0）。
+// 数据未知（known=false）恒 false——不知道就当没事，别乱跑。
+bool our_outpost_needs(const Sense& s);
+// 对面前哨是否需要处理：前哨阵地不被我方完全控制（ctrl≠0）即去争（打掉它只是
+// 争夺手段之一；完全控制才是"占领"）。数据未知恒 false。
+bool enemy_outpost_needs(const Sense& s);
 
 // ---------------- 决策树 ----------------
 // 决策跨帧记忆：锁存 / 防抖 / 巡逻进度 / 区域记账 / 操作手指点。
@@ -108,7 +143,8 @@ struct PlanState
   int pending_point = -1;     // 换点防抖：候选点 id
   int pending_count = 0;      // 候选点连续一致帧数
   int current_region = 0;     // 区域记账（开局 = start_region；过洞完成后写出口区域；
-                              // /current_region 有值时被它覆盖）
+                              // 无外部区域覆盖）
+  double op_since_s = 0.0;
   int op_goal = -1;           // 操作手指的点表 id；-1 = 无。到达后清除，恢复正常决策
   bool op_fresh = false;      // 指点刚到（还没下发过导航）：即使与当前目标同一点也要
                               // 取消重发——这就是"导航目标的更新"（操作手再按一次 =
@@ -156,6 +192,8 @@ struct TunnelRunner
   int exit_region = -1;        // 出口对正点绑定的区域；完成时写进 plan.current_region
   double phase_since_s = 0.0;  // 进入当前阶段的时刻，单调秒
   double block_until_s = 0.0;  // 失败冷却截止时刻；期间不再启动任何过洞
+  bool crossing_started = false;  // 已向出口运动：失败后必须保留穿洞恢复事务
+  bool exit_reached = false;      // 已确认到出口，区域记账不再依赖展开反馈
 
   // 是否正在过洞（独占执行权）。
   bool active() const { return phase != kOff; }
@@ -172,8 +210,8 @@ struct TunnelRunner
 
   // 状态机推进，每 tick 调一次（仅 active() 时有意义）。
   // 副作用：nav_set_goal / fold_set / base_spin / base_stop / nav_cancel；
-  //   展开完成时写 plan.current_region = exit_region 并把 phase 置回 kOff
-  //   （失败另置冷却，不写 plan）。
+  //   到达出口时写 plan.current_region；展开完成后把 phase 置回 kOff
+  //   （洞内/展开失败保持事务，冷却后重试）。
   void step(Ports& ports, const Config& cfg, PlanState& plan, double now);
 
   // 中止（比赛结束 / 阵亡 / 上层要求待机）：停车、取消导航、进冷却。
@@ -186,6 +224,8 @@ struct ExecState
 {
   int applied_goal = -2;      // 已下发导航目标的点 id；-2 = 无
   double retry_until_s = 0.0; // 导航失败后的重试解禁时刻
+  bool stop_sent = false; // 当前停止/冷却窗口已收尾，避免每 tick 重复取消
+  double goal_since_s = 0.0; // 当前普通导航目标下发时间
   TunnelRunner tunnel;        // 过洞状态机
   bool match_on = false;      // 比赛当前是否进行（沿检测，两路执行器共用）
   bool standby_cleaned = true;  // 进待机后是否已完成一次性收尾（true = 已收尾/静默中）
@@ -214,7 +254,7 @@ void run_auto_buy(Ports& ports, const Config& cfg, const Sense& s, PlanState& pl
 // ---------------- 区域记账 ----------------
 // 区域 = 纯记账（不比最近点、不订阅区域话题，零区域接口）：
 //   开赛沿（比赛开始的那一拍）把 plan.current_region 重置为 start_region——
-//   新开赛车被摆回开局位；之后**唯一**的更新点是过洞完成写出口对正点的区域。
+//   新开赛车被摆回开局位；之后**唯一**的更新点是到达出口写出口对正点的区域。
 //   记账为什么自洽：车只按决策发的导航目标移动，跨区移动必走"过洞流程"，
 //   过洞完成必写出口区域 → 不存在车绕开决策换区的路径。
 //   （代价：被外力推着穿过洞/被搬走，记账不会自纠——靠洞口"未折叠拒绝裸穿"
@@ -243,12 +283,14 @@ void nav_cruise(Ports& ports, const Config& cfg, const Sense& s, int target_poin
 //       plan — 决策记忆（过洞完成时写区域记账）；ex — 执行器状态（会被写）；
 //       now — 单调秒。
 // 副作用：见 TunnelRunner 与常规导航逻辑；过洞进行中独占执行权。
+bool update_match_gate(Ports& ports, const Config& cfg, const Sense& s,
+                       PlanState& plan, ExecState& ex);
+
 void run_executor(Ports& ports, const Config& cfg, const Sense& s, const Decision& d,
                   PlanState& plan, ExecState& ex, double now);
 
 // 一步总入口（操作手指令 → 感知 → 区域同步 → 决策树 → 执行器），节点主循环每 tick 调它。
-// 操作手指令最先处理（买类随时转发）；区域同步：/current_region（定位侧）有值时
-// 优先覆盖 plan.current_region（enable_tunnel = false 时整套跳过）。
+// 与行为树共用门控函数；操作手只消费指点，区域采用开局/出口记账。
 // 返回：本 tick 实际生效的目标点 id（-1 = 待机；过洞中 = 过完要去的点）。
 int step(Ports& ports, const Config& cfg, PlanState& plan, ExecState& ex, double now);
 

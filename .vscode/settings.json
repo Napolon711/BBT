@@ -1,3 +1,14 @@
 {
-    "cmake.sourceDirectory": "/home/chengdong/BBT/src/bbt_decide"
+    "cmake.sourceDirectory": "${workspaceFolder}/src/bbt_decide",
+    "search.exclude": {
+        "**/install": true,
+        "**/build": true,
+        "**/log": true,
+        "**/libxr/doc": true
+    },
+    "files.watcherExclude": {
+        "**/install/**": true,
+        "**/build/**": true,
+        "**/log/**": true
+    }
 }

@@ -60,13 +60,24 @@ inline Vec2 apply_frame_transform(const Vec2& p, const FrameTransform& t)
   return Vec2{p.x * c - p.y * s + t.dx, p.x * s + p.y * c + t.dy};
 }
 
-// 点的用途分类。保底决策树只需要两种点：家（补给/回血）和巡逻点。
+// 点的用途分类。home/patrol 是基础两类；outpost/retake 只在前哨争夺开着时参与选点。
 enum Zone : int
 {
-  kZoneHome = 0,    // 家 = 补给区：血量低时回这里
-  kZonePatrol = 1,  // 巡逻点：平时按环形顺序轮换着走
-  kZoneCount = 2    // 分类总数（校验用，不是一个分类）
+  kZoneHome = 0,     // 家 = 补给区：血量低时回这里
+  kZonePatrol = 1,   // 巡逻点：两个前哨阵地都被我方完全控制后按环形顺序轮换着走
+  kZoneOutpost = 2,  // 对面前哨攻击位：站在上面激活对面前哨阵地的增益点 + 打前哨站
+                     // （"打前哨" = 到这个点 + 告诉电控优先打对面前哨，见 attack_cmd）
+  kZoneRetake = 3,   // 我方前哨夺回位：站在上面激活我方前哨阵地的增益点把控制权抢回来
+  kZoneCount = 4     // 分类总数（校验用，不是一个分类）
 };
+
+// 前哨阵地控制状态（裁判 0x0101 的 2-bit 编码，己方视角；-1 = 没收到过数据）。
+// 语义来自 2027 规则 5.6.2：完全控制 = 己方占领；临时控制 = 正在转化中；
+// 未控制 = 在对方手里（或中立）。己方"完全控制"是决策里"占领"的唯一判据。
+constexpr int kCtrlUnknown = -1;  // 没收到过 0x0101/0x0003（未知就当没事，不乱跑）
+constexpr int kCtrlFull = 0;      // 己方完全控制
+constexpr int kCtrlTemp = 1;      // 己方临时控制
+constexpr int kCtrlNone = 2;      // 己方未控制（对方控制 / 争夺中）
 
 // 区域（region）：用户自定义的"场地分片"，只用于**过洞路由**，不是几何多边形。
 // yaml 里的 regions: 是一张名字表（名字随意，数量随意），代码里用下标当区域号。
@@ -102,17 +113,34 @@ struct TunnelDef
   Vec2 center;                       // 洞中心（可选，地图对齐基准）
 };
 
-// 裁判系统快照：一次读到的比赛基础数据。
-// 门控只看 game_progress（开始/结束）；血量/弹量用于回家锁存。不搞"有效性+新鲜度"
-// 判定——能收到比赛状态和血量就行（使用者口径）。没收到过数据时 game_progress
-// 停在 0（未开始），决策自然不跑。未知弹量/金币用 -1，绝不用 0 顶替。
+// 裁判系统快照：摘要与 typed 裁判数据合成。
+// 门控只看 game_progress（开始/结束）；血量/弹量用于回家锁存；前哨字段驱动前哨争夺。
+// 不搞"有效性+新鲜度"判定——能收到比赛状态和血量就行（使用者口径）。没收到过数据时
+// game_progress 停在 0（未开始），决策自然不跑。**一切"未知"都用 -1，绝不用 0 顶替**
+// （前哨血量 0 = 被打掉，是有效信息，不能和"没收到"混淆——这是 -1 约定的核心原因）。
 struct RefereeSnapshot
 {
   int game_progress = 0;   // 0 未开始 / 4 进行中 / 5 结束（RoboMaster 裁判系统编码）
   int hp = 0;              // 当前血量（点）
   int hp_max = 1;          // 血量上限（点）；默认 1 只是防除零
-  int shots = -1;          // 剩余可发弹数；-1 = 未知（未知时不参与弹量锁存，金币仅透传）
-  int coins = -1;          // 金币；-1 = 未知（本版不买东西，仅透传）
+  int shots = -1;          // 剩余可发弹量；-1 = 未知（未知时不参与弹量锁存，金币仅透传）
+  int coins = -1;          // 金币；-1 = 未知
+  // ---- 前哨（2027 规则 5.6.2 前哨阵地；R/B 已由桥按我方颜色映射成我方/对方）----
+  int our_outpost_hp = -1;     // 我方前哨站血量；-1 未知；0 = 被打掉（阵地易主时会以 500 血重建）
+  int our_outpost_ctrl = kCtrlUnknown;   // 我方前哨阵地控制状态（kCtrl*；未知 = 不参与争夺判定）
+  int enemy_outpost_hp = -1;   // 对面前哨站血量；-1 未知；0 = 被打掉
+  int enemy_outpost_ctrl = kCtrlUnknown; // 对面前哨阵地控制状态
+  // ---- 场地 / 经济（观测用；不直接驱动选点）----
+  int our_base_hp = -1;        // 己方基地血量
+  int enemy_base_hp = -1;      // 对方基地血量
+  int ally_ctrl_deg = -1;     // 己方累计控制度
+  int enemy_ctrl_deg = -1;    // 对方累计控制度
+  int robot_id = 0;            // 本机 ID（红 <100 / 蓝 ≥101；0 = 未知）
+  // ---- 兑换 / 复活（0x020D；自动买的门控用）----
+  int revive_available = -1;   // 0 不可复活 / 1 可免费复活 / 2 可金币兑换立即复活；-1 未知
+  int revive_cost = -1;        // 兑换立即复活所需金币；-1 未知
+  int remote_ammo_pool = -1;   // 队伍 17mm 允许发弹量剩余可兑换数；-1 未知；0 = 别再下单了
+  int out_of_combat = -1;      // 是否脱战：1 脱战 / 0 交战中；-1 未知。远程兑换血量要求脱战
   double stage_remain_s = -1.0; // 当前阶段剩余时间，单位 s；-1 = 未填
 };
 
@@ -120,11 +148,16 @@ struct RefereeSnapshot
 // 点表点）。买弹/买血/买复活（type 1–3）不是决策层的事——裁判客户端/电控直接办，
 // 收到也只记下序号忽略；效果从裁判数据里看（血量/弹量涨了就是买到了）。
 // seq 是指令序号（发送侧每条 +1，0 = 无指令）：决策层按它去重，同一条只处理一次。
+// 实车链路（裁判 0x0303 小地图点击）给的是**坐标**而不是点表 id：type=4 时
+// param = -1、x/y = 点击坐标，决策层把它吸附到最近的点表点（半径 op_snap_m 内才接）。
 struct OpCmd
 {
   uint32_t seq = 0;   // 指令序号；0 = 没有指令
-  int type = 0;       // 0 无 / 1 买弹 / 2 买血 / 3 买复活（这三类忽略）/ 4 指点
-  int param = 0;      // 4:点表 id；其他类型的参数决策层不看
+  int type = 0;       // 0 无 / 1 买弹 / 2 买血 / 3 买复活（这三类忽略）/ 4 指点 /
+                      // 5 点了某个对方机器人头像（param = 机器人 ID；自瞄的事，忽略）
+  int param = 0;      // 4:点表 id（sim 链路）或 -1（实车坐标指点，看 x/y）；其他类型决策层不看
+  double x = 0.0;     // 4 且 param=-1 时的点击坐标（场地系，单位 m）
+  double y = 0.0;
 };
 
 // 话题接线表：抽象 Port → 具体话题名。
@@ -143,22 +176,28 @@ struct TopicMap
   std::string fold_cmd;      // 折叠指令（发布）：UInt8 1 折叠 / 2 展开
   std::string fold_state;    // 折叠状态（订阅）：Int32 0–4，编码同 FoldState
   // 裁判系统
-  std::string referee;       // 裁判摘要（订阅）：Float64MultiArray(10)，字段顺序见上
-                             // 自动买的判定数据源（血量/弹量/金币）；买了以后也是从
-                             // 这里看到账（血量/弹量涨了）
+  std::string referee;       // 裁判摘要（订阅）：Float64MultiArray，实车 14 元素；
+                             // 同时兼容旧 BBT 完整 19 元素及 Arena 9/12 元素
   std::string op_cmd;        // 操作手指令（订阅）：Int32MultiArray [type, param, seq]。
                              // 决策层只消费 type=4 指点（param=点表 id）；买类(1–3)不是
-                             // 决策层的事，收到即忽略（操作手经裁判客户端/电控直接办）
+                             // 决策层的事，收到即忽略（操作手经裁判客户端/电控直接办）。
+                             // 可留空 = 用 op_cmd_xy（两者至少接一个）
+  std::string op_cmd_xy;     // 操作手指令·坐标版（订阅）：Float64MultiArray
+                             // [type, param, seq, x, y]。实车链路用（裁判 0x0303 给的是
+                             // 点击坐标）；可留空 = 用 op_cmd
   std::string buy_ammo;      // 自动买弹请求（发布）：Int32 发数（裁判客户端/电控执行）
   std::string buy_hp;        // 自动买血请求（发布）：Int32 量
   std::string buy_revive;    // 自动买复活请求（发布）：Int32 1（hp==0 即阵亡，不需要
                              // 单独的阵亡判定）
+  std::string attack_cmd;    // 自瞄意图提示（发布）：Int32MultiArray(4)
+                             // [target_type, target_id, fire, free_fire]（打前哨时
+                             // type=2/id=1=对面前哨；电控自瞄可参考可忽略）
   // 数据源声明（订阅）：String "sim"/"real"。实车模式下听到 "sim" 立即判裁判无效并停车
   std::string data_source;
   // 接口数据流统计（发布）：String(JSON) 1 Hz，用来确认"数据确实从真实接口进来了"
   std::string iface_status;
 
-  // 做什么：必填话题非空检查。
+  // 做什么：必填话题非空检查。op_cmd / op_cmd_xy 二选一（至少一个非空）。
   // 参数：err — 输出，第一个空字段名；成功时不改。返回：true = 全部非空。
   bool all_named(std::string& err) const
   {
@@ -167,8 +206,9 @@ struct TopicMap
         {"nav_goal", &nav_goal}, {"nav_status", &nav_status}, {"nav_cancel", &nav_cancel},
         {"odom", &odom}, {"cmd_vel", &cmd_vel},
         {"chassis_mode", &chassis_mode}, {"spin", &spin}, {"fold_cmd", &fold_cmd},
-        {"fold_state", &fold_state}, {"referee", &referee}, {"op_cmd", &op_cmd},
+        {"fold_state", &fold_state}, {"referee", &referee},
         {"buy_ammo", &buy_ammo}, {"buy_hp", &buy_hp}, {"buy_revive", &buy_revive},
+        {"attack_cmd", &attack_cmd},
         {"data_source", &data_source}, {"iface_status", &iface_status}};
     for (const auto& it : items)
     {
@@ -178,12 +218,17 @@ struct TopicMap
         return false;
       }
     }
+    if (op_cmd.empty() && op_cmd_xy.empty())
+    {
+      err = "op_cmd/op_cmd_xy";
+      return false;
+    }
     return true;
   }
 };
 
-// 话题表出厂默认值：与主工作区 tools/arena_ros_bridge.py 的临时契约一致，
-// 因此 Arena 仿真桥不用改一行就能直接对接本包。三条 buy 话题与主工作区同名。
+// 话题表出厂默认值：与 decision.yaml 及 ROS 适配层的现行契约一致。
+// 操作手坐标指点使用 /referee/operator_cmd；仿真 ID 指点使用 /sentry/operator_point。
 inline TopicMap default_topic_map()
 {
   TopicMap t;
@@ -197,10 +242,12 @@ inline TopicMap default_topic_map()
   t.fold_cmd = "/gimbal_fold_cmd";
   t.fold_state = "/gimbal_fold_state";
   t.referee = "/referee/summary";
-  t.op_cmd = "/referee/operator_cmd";
+  t.op_cmd = "/sentry/operator_point";      // Int32 ID 指点；留空 = 不接
+  t.op_cmd_xy = "/referee/operator_cmd";    // Float64 坐标指点；留空 = 不接
   t.buy_ammo = "/sentry/buy_ammo";
   t.buy_hp = "/sentry/buy_hp";
   t.buy_revive = "/sentry/buy_revive";
+  t.attack_cmd = "/sentry/attack_cmd";
   t.data_source = "/sentry/data_source";
   t.iface_status = "/sentry/iface_status";
   return t;
@@ -216,6 +263,17 @@ struct Config
   // 任何目标直接发导航。true = 按 region 路由过洞（默认）。
   bool enable_tunnel = true;
 
+  // ---- 前哨争夺总开关（显式）----
+  // true（默认）= 参与前哨争夺：我方前哨被打掉/阵地失守 → 去 retake 点；
+  // 对面前哨阵地不被我方完全控制 → 去 outpost 点；两边阵地都被我方完全控制 → 巡逻。
+  // 判据只有 0x0003 的前哨血量 + 0x0101 的前哨阵地控制状态，不需要雷达。
+  // 数据未知（-1）的一侧不参与判定（不知道就当没事，别乱跑）。
+  // false = 整套前哨逻辑不存在（走廊等没有前哨的地图），outpost/retake 点也不需要。
+  bool enable_outpost = true;
+  double op_goal_timeout_s = 120.0; // 指点过期后恢复规则决策；跨洞恢复仍须先完成
+  double op_snap_m = 1.5;  // 操作手坐标指点吸附半径：点击处 m 内最近的点表点才算数，
+                           // 半径内没有点 = 忽略这次点击（防误点墙上/场外）
+
   // ---- 手填配置表（决策只引用 id / 区域下标，坐标全在这里改）----
   std::vector<std::string> regions;  // 区域名表（下标 = 区域号）；换地图改这张表。
                                      // 仅 enable_tunnel = true 时必填
@@ -224,6 +282,7 @@ struct Config
   std::vector<PointDef> points;      // 点表：家 + 巡逻点（enable_tunnel=true 时各绑区域）
   std::vector<TunnelDef> tunnels;    // 洞表：每条两个对正点 + 各自服务的区域
   FrameTransform field_to_map;       // 场地系 → 地图系（align_map.py 解算；加载时生效）
+  bool require_map_alignment = false; // 正式地图实车必须显式标定，恒等也要 enabled=true
 
   // ---- 阈值（单位见各字段注释）----
   double hp_home_ratio = 0.30;    // 血量比例低于此值 → 回家（低阈值触发）
@@ -245,7 +304,7 @@ struct Config
   double hp_buy_ratio = 0.40;     // 血量比例低于此值（且活着）→ 下单买血；<=0 = 不买血。
                                   // 故意比 hp_home_ratio(0.30) 高：先试远程买血回一口，
                                   // 买不到再走回家那条路
-  int hp_buy_amount = 200;        // 每次买血量
+  int hp_buy_amount = 1;          // 一次远程回血请求；恢复量由裁判规则决定
   int hp_buy_min_coins = 300;     // 金币低于此值不买血
   int revive_buy_min_coins = 200; // 金币 ≥ 此值且 hp==0（=阵亡，不需要单独的阵亡判定）
                                   // → 下单买复活；-1 = 不自动买复活
@@ -261,6 +320,7 @@ struct Config
   double nav_timeout_s = 25.0;    // 单段导航超时：到对正点/到巡逻点超过这么久算失败
   double nav_retry_s = 2.0;       // 导航失败后的重试间隔（重试节奏，防打爆导航）
   double fold_timeout_s = 3.0;    // 折叠/展开确认超时
+  double fold_stale_ms = 1000.0;  // 折叠反馈断流后按未知处理
   double tunnel_retry_cooldown_s = 5.0;  // 过洞失败后的重试冷却
   double in_tunnel_margin_m = 0.3; // 车离闸线中段小于此距离视为"已在洞口/洞内"
   double arrive_radius_m = 0.5;   // 距离小于此值算"已站在点上"（nav 没报 success 时的兜底）
@@ -278,7 +338,7 @@ struct Decision
 {
   int target_point = -1;   // 点表 id；-1 = 原地保持（停车）
   int tunnel_id = -1;      // 洞表下标；-1 = 本帧不需要过洞
-  uint32_t stamp_ms = 0;   // 决策生成时刻，ms
+  uint64_t stamp_ms = 0;   // 决策生成时刻，单调毫秒
 };
 
 // 加载 yaml 配置（与 decision.yaml 一一对应）。

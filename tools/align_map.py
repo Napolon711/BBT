@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把"导航建图坐标系"对齐到"场地坐标系（decision.yaml 的图纸系）"——BBT 版。
+"""把"导航建图坐标系"对齐到"点表场地坐标系"——BBT 版。
 
 用法：
   # 1) 写一个对应表（**洞中心**：隧道名 → 建图系里实测的坐标），至少 2 个，
@@ -23,7 +23,7 @@
 - 2 个点 → 唯一解；≥3 个点 → 最小二乘，并给出每个点的残差（超 5 cm 就查哪个点标错）。
 - 对齐后 BBT 加载配置时会把 points / tunnels 的全部坐标一起搬到建图系，
   发给导航的 /goal_pose 与收到的 /odom 就在同一系里了。
-- 仿真（Arena）不需要：桥自己做了场地镜像，field_to_map 保持 enabled: false。
+- 仿真必须提供与点表一致的场地坐标；实车标定后必须 enabled: true。
 """
 import argparse, csv, io, math, sys
 from pathlib import Path

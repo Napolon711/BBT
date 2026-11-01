@@ -1,0 +1,7 @@
+id,map_x,map_y
+own_road_tunnel,,
+enemy_near_tunnel,,
+enemy_far_tunnel,,
+enemy_road_tunnel,,
+own_near_tunnel,,
+own_far_tunnel,,
