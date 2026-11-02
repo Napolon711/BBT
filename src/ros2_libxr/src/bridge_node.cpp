@@ -178,7 +178,15 @@ public:
   {
     port_ = declare_parameter<std::string>("port", "/dev/ttyACM0");
     baud_ = declare_parameter<int>("baud", 115200);
-    robot_id_param_ = declare_parameter<int>("robot_id", 0);
+    rcl_interfaces::msg::ParameterDescriptor team_descriptor;
+    team_descriptor.description = "Operator selects red/blue at startup; restart to change side";
+    team_descriptor.read_only = true;
+    const auto own_team = declare_parameter<std::string>("own_team", "", team_descriptor);
+    if (own_team != "red" && own_team != "blue")
+      throw std::invalid_argument("own_team must be explicitly set to red or blue at startup");
+    // The operator chooses our side. The referee's reported robot_id is telemetry,
+    // not an authority to change or veto that choice.
+    robot_id_ = own_team == "red" ? 7 : 107;
     publish_raw_ = declare_parameter<bool>("publish_raw", true);
     zero_vel_timeout_ms_ = declare_parameter<int>("zero_vel_timeout_ms", 200);
     referee_timeout_ms_ = declare_parameter<int>("referee_timeout_ms", 2000);
@@ -193,13 +201,10 @@ public:
     if (zero_vel_timeout_ms_ <= 0 || referee_timeout_ms_ <= 0 ||
         !std::isfinite(summary_rate_hz_) || summary_rate_hz_ <= 0.0 ||
         !std::isfinite(sentry_cmd_rate_hz_) || sentry_cmd_rate_hz_ <= 0.0 || sentry_cmd_rate_hz_ > 10.0 ||
-        !std::isfinite(sentry_cmd_hold_s_) || sentry_cmd_hold_s_ <= 0.0 ||
-        (robot_id_param_ != 0 && robot_id_param_ != 7 && robot_id_param_ != 107))
-      throw std::invalid_argument("invalid bridge timeout/rate/robot_id parameters");
-    if (robot_id_param_ > 0)
-    {
-      robot_id_ = robot_id_param_;
-    }
+        !std::isfinite(sentry_cmd_hold_s_) || sentry_cmd_hold_s_ <= 0.0)
+      throw std::invalid_argument("invalid bridge timeout/rate parameters");
+    RCLCPP_INFO(get_logger(), "Operator selected own_team=%s, sentry sender_id=%d",
+                own_team.c_str(), robot_id_);
 
     init_topics();
     init_publishers();
@@ -796,10 +801,6 @@ private:
         robot_status_pub_->publish(msg);
         st_.robot_status = msg;
         st_.has_robot_status = true;
-        if (robot_id_param_ == 0)
-        {
-          robot_id_ = (msg.robot_id == 7 || msg.robot_id == 107) ? msg.robot_id : 0;
-        }
         break;
       }
       case kCmdPowerHeat: {
@@ -1014,9 +1015,6 @@ private:
     }
   }
 
-  // 红方 ID 为 1..7，蓝方为 101..107
-  bool is_red() const { return robot_id_ > 0 && (robot_id_ / 100) == 0; }
-
   // ------------------------------------------------------------------ 摘要
   void publish_summary()
   {
@@ -1033,8 +1031,7 @@ private:
     std_msgs::msg::Float64MultiArray msg;
     msg.data.resize(14, -1.0);
     msg.data[7] = 0.0;
-    const bool red = is_red();
-    const bool color_known = robot_id_ == 7 || robot_id_ == 107;
+    const bool red = robot_id_ == 7;
 
     if (st_.has_game_status)
     {
@@ -1051,7 +1048,7 @@ private:
       msg.data[3] = static_cast<double>(st_.allowance.projectile_allowance_17mm);
       msg.data[4] = static_cast<double>(st_.allowance.remaining_gold_coin);
     }
-    if (color_known && st_.has_robot_hp && age(kCmdRobotHP) <= static_cast<std::uint32_t>(referee_timeout_ms_))
+    if (st_.has_robot_hp && age(kCmdRobotHP) <= static_cast<std::uint32_t>(referee_timeout_ms_))
     {
       const int own_outpost = red ? HP_OUTPOST_R : HP_OUTPOST_B;
       msg.data[5] = static_cast<double>(st_.hp[own_outpost]);
@@ -1060,7 +1057,8 @@ private:
       // [11] 己方累计控制度（0x0003 偏移 20，量纲以协议为准，协议没写单位，别当百分比用）
       msg.data[11] = static_cast<double>(st_.hp[HP_ALLY_CONTROL]);
     }
-    if (color_known && st_.has_field_event && age(kCmdFieldEvent) <= static_cast<std::uint32_t>(referee_timeout_ms_))
+    if (st_.has_field_event &&
+        age(kCmdFieldEvent) <= static_cast<std::uint32_t>(referee_timeout_ms_))
     {
       const std::uint8_t ctrl = red ? ((st_.event_data >> 28) & 0x3U)
                                     : ((st_.event_data >> 30) & 0x3U);
@@ -1124,8 +1122,7 @@ private:
 
   bool send_sentry_command(const rm2027_interfaces::msg::SentryCommand & cmd)
   {
-    if ((robot_id_ != 7 && robot_id_ != 107) ||
-        command_rx_ms_.count(kCmdSentryInfo) == 0 ||
+    if (command_rx_ms_.count(kCmdSentryInfo) == 0 ||
         steady_ms() - command_rx_ms_.at(kCmdSentryInfo) > static_cast<std::uint32_t>(referee_timeout_ms_)) return false;
     if (cmd.exchange_allowance_total > 2047 || cmd.remote_allowance_times > 15 || cmd.remote_hp_times > 15) return false;
     // Synchronize after bridge restart; a request counter may only advance by one.
@@ -1230,7 +1227,6 @@ private:
   // 参数
   std::string port_;
   int baud_{115200};
-  int robot_id_param_{0};
   int robot_id_{0};
   bool publish_raw_{true};
   int zero_vel_timeout_ms_{200};

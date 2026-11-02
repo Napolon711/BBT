@@ -4,8 +4,8 @@ ros2_libxr_bridge:
     port: /dev/ttyACM0
     # USB CDC 忽略波特率，保留参数只为兼容
     baud: 115200
-    # 哨兵机器人 ID（7 红 / 107 蓝）。填 0 表示从 0x0201 自动识别
-    robot_id: 0
+    # 开局人工指定 red / blue；必须与决策节点使用同一值。裁判 robot_id 不参与核实。
+    own_team: ""
     # 是否把每个裁判原始帧也发到 referee/raw（调试用，带宽允许就开着）
     publish_raw: true
     # 上位机侧话题名（决策层默认值，一般不用改）

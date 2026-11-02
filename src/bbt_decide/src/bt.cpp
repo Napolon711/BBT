@@ -1,149 +1,519 @@
-// BBT 行为树节点实现：只做编排，逻辑全在 planner.cpp 的纯函数里。
-// 约定：所有节点无状态（跨 tick 状态放 Context；ReactiveSequence 会 halt 兄弟节点）。
+// Production behavior-tree leaves. Priority and workflow composition live in main.xml.
 #include "bbt_decide/bt.hpp"
+#include "bbt_decide/geometry.hpp"
+
+#include <functional>
+#include <utility>
 
 namespace bbt_decide
 {
 namespace
 {
-using BT::NodeStatus;
+using Status = BT::NodeStatus;
+using Purpose = NavigationPurpose;
 
-// ------------------------------------------------------------ 门控 + 感知
-// IsMatchRunning：处理操作手指令 + 自动购买、抓一帧感知存进 ctx->sense，并做比赛门控。
-// 门控只看比赛状态：game_progress == 4（进行中）→ SUCCESS；未开始/已结束 →
-// FAILURE（外层 ReactiveFallback 落到 Standby：比赛外不发任何消息）。
-// 不做"有效性+新鲜度"判定——能收到比赛状态和血量就行（使用者口径）。
-// 操作手指令只消费"指点"（买类忽略——那是操作手和裁判客户端的事）；
-// 自动购买在比赛进行中由决策层自己下单（弹/血低、金币够、冷却过）。
-// 比赛开始的上升沿切一次底盘模式（比赛外不发）。
-BT::NodeStatus tick_gate(Context& ctx)
+class CallbackAction : public BT::StatefulActionNode
 {
-  const double now = ctx.ports->now_s();
-  ctx.sense = sense(*ctx.ports, ctx.cfg, now);
-  if (ctx.sense.match_running) update_match_gate(*ctx.ports, ctx.cfg, ctx.sense, ctx.plan, ctx.ex);
-  handle_operator(*ctx.ports, ctx.cfg, ctx.plan);
-  run_auto_buy(*ctx.ports, ctx.cfg, ctx.sense, ctx.plan, now);
-  if (!ctx.sense.match_running) return NodeStatus::FAILURE;
-  return NodeStatus::SUCCESS;
+public:
+  CallbackAction(const std::string& name, const BT::NodeConfig& config,
+                 std::function<Status()> callback)
+      : BT::StatefulActionNode(name, config), callback_(std::move(callback)) {}
+  static BT::PortsList providedPorts() { return {}; }
+private:
+  Status onStart() override { return callback_(); }
+  Status onRunning() override { return callback_(); }
+  void onHalted() override {} // Blackboard physical evidence outlives a reactive halt.
+  std::function<Status()> callback_;
+};
+
+double now(const Context& c) { return c.ports->now_s(); }
+Status check(bool condition) { return condition ? Status::SUCCESS : Status::FAILURE; }
+
+void forget_navigation(Context& c)
+{
+  c.ex.navigation = {};
+  c.ex.applied_goal = -2;
+  c.ex.applied_generation = 0;
 }
 
-// ------------------------------------------------------------ 决策树
-// DecideTarget：跑保底决策树（待机/阵亡→-1；血量锁存→家；巡逻轮换+防抖）。
-// nav_goal_for 告诉决策树"执行器当前导航目标对应哪个点"：过洞中是 -2，
-// 防止对正点的 success 被误当成巡逻到点而跳点。
-BT::NodeStatus tick_decide(Context& ctx)
+void explicit_stop(Context& c)
 {
-  const double now = ctx.ports->now_s();
-  const int nav_goal_for = ctx.ex.tunnel.active() ? -2 : ctx.ex.applied_goal;
-  ctx.decision = decide_tree(ctx.sense, ctx.cfg, ctx.plan, now, nav_goal_for);
-  return NodeStatus::SUCCESS;
+  if (!c.ex.stop_sent)
+  {
+    c.ports->nav_cancel();
+    c.ports->base_spin(0.0);
+    c.ports->base_stop();
+    c.ports->attack_cmd(0, 0, 0, 0);
+    c.ex.stop_sent = true;
+  }
+  forget_navigation(c);
 }
 
-// ------------------------------------------------------------ 过洞执行
-// TunnelCross：过洞五段状态机。目标在别的区域 → 启动/推进（独占，RUNNING）；
-// 跨区但被拒/冷却/不可达 → 停车等待（RUNNING，绝不把跨区目标放给常规导航）；
-// 与过洞无关（同区/空目标）→ FAILURE 让位给 NavCruise。
-// 有状态动作：状态在 ctx->ex.tunnel（Context 黑板），节点成员不存东西。
-class TunnelCross : public BT::StatefulActionNode
+void cancel_owned_navigation(Context& c)
 {
-public:
-  TunnelCross(const std::string& name, const BT::NodeConfig& config,
-              std::shared_ptr<Context> ctx)
-    : BT::StatefulActionNode(name, config), ctx_(std::move(ctx))
-  {
-  }
-  static BT::PortsList providedPorts() { return {}; }
+  if (c.ex.navigation.active()) c.ports->nav_cancel();
+  forget_navigation(c);
+}
 
-private:
-  NodeStatus onStart() override { return step(); }
-  NodeStatus onRunning() override { return step(); }
-  // 被 halt（比赛结束切 Standby / 上层换树）：只清状态机记账，**不发任何消息**——
-  // 一次性收尾（取消导航 + 停自旋）由 Standby 的下降沿统一做，这里做了会双发。
-  // 不进冷却、不动折叠——正常退出 ≠ 过洞失败，且退出不等于离开洞口。
-  void onHalted() override
-  {
-    ctx_->ex.tunnel.phase = TunnelRunner::kOff;
-    ctx_->ex.tunnel.tunnel = -1;
-    ctx_->ex.tunnel.after_point = -1;
-  }
-  NodeStatus step()
-  {
-    const double now = ctx_->ports->now_s();
-    return tunnel_handled(*ctx_->ports, ctx_->cfg, ctx_->sense, ctx_->decision,
-                          ctx_->plan, ctx_->ex, now)
-               ? NodeStatus::RUNNING
-               : NodeStatus::FAILURE;
-  }
-  std::shared_ptr<Context> ctx_;
-};
-
-// ------------------------------------------------------------ 常规导航
-// NavCruise：同区域目标的常规导航（换点先取消旧 Goal；失败按 nav_retry_s 重试；
-// 操作手重指点 = 目标更新，取消重发；空目标/点不存在 → 停车）。
-// 恒发受击旋转 spin_w（本段 = 非过洞段）；恒 RUNNING（换不换点由决策层下 tick 定）。
-class NavCruise : public BT::StatefulActionNode
+void tactical_outputs(Context& c)
 {
-public:
-  NavCruise(const std::string& name, const BT::NodeConfig& config,
-            std::shared_ptr<Context> ctx)
-    : BT::StatefulActionNode(name, config), ctx_(std::move(ctx))
-  {
-  }
-  static BT::PortsList providedPorts() { return {}; }
+  c.ports->base_spin(c.cfg.spin_w);
+  if (c.decision.target.zone == kZoneOutpost) c.ports->attack_cmd(2, 1, 1, 0);
+  else c.ports->attack_cmd(0, 0, 1, 1);
+  c.ex.stop_sent = false;
+}
 
-private:
-  NodeStatus onStart() override { return step(); }
-  NodeStatus onRunning() override { return step(); }
-  void onHalted() override {}  // 换点/中止的收尾在 nav_cruise 与 Standby 里，这里不重复
-  NodeStatus step()
-  {
-    nav_cruise(*ctx_->ports, ctx_->cfg, ctx_->sense, ctx_->decision.target_point,
-               ctx_->ex, ctx_->ports->now_s(), ctx_->plan.op_fresh);
-    return NodeStatus::RUNNING;
-  }
-  std::shared_ptr<Context> ctx_;
-};
-
-// ------------------------------------------------------------ 待机
-// Standby：比赛外静默。下降沿（比赛刚结束）做**一次性**收尾——终止过洞流程
-// （只清状态，不动折叠）、取消导航（在跑的导航节点就此终止）、停自旋（我们开的
-// 我们关掉）；**不**发停车指令（不为比赛外停车专门留一条给电控的口——取消导航
-// 后底盘自己停）。收尾之后完全静默：一条消息都不发，等比赛开始。
-class Standby : public BT::StatefulActionNode
+bool owns_ordinary_request(const Context& c)
 {
-public:
-  Standby(const std::string& name, const BT::NodeConfig& config,
-          std::shared_ptr<Context> ctx)
-    : BT::StatefulActionNode(name, config), ctx_(std::move(ctx))
+  return c.ex.navigation.purpose == Purpose::ordinary &&
+         c.ex.navigation.target_point == c.decision.target_point &&
+         c.ex.navigation.generation == c.decision.generation;
+}
+
+void set_request(Context& c, Purpose purpose, int target, uint64_t generation)
+{
+  c.ex.navigation = {purpose, target, generation, now(c)};
+  c.ex.applied_goal = purpose == Purpose::ordinary ? target : -2;
+  c.ex.applied_generation = generation;
+  c.ex.goal_since_s = now(c);
+  c.ex.stop_sent = false;
+}
+
+void ordinary_failure(Context& c)
+{
+  c.ex.retry_target = c.decision.target_point;
+  c.ex.retry_generation = c.decision.generation;
+  c.ex.retry_until_s = now(c) + c.cfg.nav_retry_s;
+  c.ex.stop_sent = false;
+  explicit_stop(c);
+}
+
+void tunnel_failure(Context& c)
+{
+  remember_tunnel_progress(c.sense, c.ex.tunnel);
+  const double blocked_until = now(c) + c.cfg.tunnel_retry_cooldown_s;
+  if (!c.ex.tunnel.crossing_started) c.ex.tunnel = {};
+  c.ex.tunnel.block_until_s = blocked_until;
+  c.ex.tunnel.fold_requested_s = -1.0;
+  c.ex.tunnel.unfold_requested_s = -1.0;
+  c.ex.stop_sent = false;
+  explicit_stop(c);
+}
+
+void select_point(Context& c, const PointDef* target, bool is_operator = false)
+{
+  c.decision = {};
+  c.decision.stamp_ms = static_cast<uint64_t>(now(c) * 1000.0);
+  if (!target) return;
+  c.decision.target = *target;
+  c.decision.target_point = target->id;
+  c.decision.target_valid = true;
+  c.decision.operator_target = is_operator;
+  c.decision.generation = is_operator ? c.plan.op_generation : 0;
+}
+
+void consume_operator(Context& c)
+{
+  c.plan.op_active = false;
+  c.plan.op_goal = -1;
+  c.plan.op_arrived_s = -1.0;
+  c.plan.op_clear_since_s = -1.0;
+}
+
+Status read_inputs(Context& c)
+{
+  c.sense = sense(*c.ports, c.cfg, now(c));
+  handle_operator(*c.ports, c.cfg, c.plan);
+  return Status::SUCCESS;
+}
+
+Status begin_match(Context& c)
+{
+  if (!c.ex.match_on)
   {
+    c.ex.match_on = true;
+    c.ex.standby_cleaned = false;
+    c.ex.stop_sent = false;
+    c.ports->base_set_mode(c.cfg.mode_independent);
+    if (c.cfg.enable_tunnel) c.plan.current_region = c.cfg.start_region;
   }
-  static BT::PortsList providedPorts() { return {}; }
+  return Status::SUCCESS;
+}
 
-private:
-  NodeStatus onStart() override { return step(); }
-  NodeStatus onRunning() override { return step(); }
-  void onHalted() override {}
-  NodeStatus step()
+Status standby(Context& c)
+{
+  if (!c.ex.standby_cleaned)
   {
-    update_match_gate(*ctx_->ports, ctx_->cfg, ctx_->sense, ctx_->plan, ctx_->ex);
-    return NodeStatus::RUNNING;  // 静默等待比赛开始
+    c.ex.stop_sent = false;
+    explicit_stop(c);
+    c.ex.tunnel = {};
+    c.ex.retry_until_s = 0.0;
+    c.plan.cur_point = -1;
+    c.plan.cur_target_valid = false;
+    c.plan.pending_point = -1;
+    c.plan.pending_count = 0;
+    consume_operator(c);
+    c.ex.standby_cleaned = true;
   }
-  std::shared_ptr<Context> ctx_;
-};
+  // Consume buffered pre-match commands, but never resurrect a consumed task.
+  consume_operator(c);
+  c.decision = {};
+  c.ex.match_on = false;
+  return Status::RUNNING;
+}
 
-}  // namespace
+Status observe_operator(Context& c)
+{
+  if (!c.plan.op_active) return Status::SUCCESS;
+  const bool own_final = c.ex.navigation.purpose == Purpose::ordinary &&
+      c.ex.navigation.target_point == c.plan.op_target.id &&
+      c.ex.navigation.generation == c.plan.op_generation;
+  if (c.plan.op_arrived_s < 0.0 && own_final && c.sense.nav_state == kGoalSuccess)
+    c.plan.op_arrived_s = now(c);
+  if (c.plan.op_arrived_s >= 0.0 && c.sense.out_of_combat == 1)
+  {
+    if (c.plan.op_clear_since_s < 0.0) c.plan.op_clear_since_s = now(c);
+  }
+  else c.plan.op_clear_since_s = -1.0;
+  return Status::SUCCESS;
+}
 
-// ------------------------------------------------------------ 注册
-// 把全部节点注册进工厂：XML（trees/main.xml）里按名字引用。
+Status commit_target(Context& c)
+{
+  auto& p = c.plan;
+  const auto& candidate = c.decision;
+  const bool same = p.cur_target_valid == candidate.target_valid &&
+      (!candidate.target_valid ||
+       (p.cur_point == candidate.target_point && p.cur_generation == candidate.generation &&
+        p.cur_operator_target == candidate.operator_target));
+  bool accept = same || candidate.operator_target || !p.cur_target_valid;
+  if (!same && !accept)
+  {
+    if (p.pending_point != candidate.target_point)
+    {
+      p.pending_point = candidate.target_point;
+      p.pending_count = 1;
+    }
+    else if (p.pending_count < c.cfg.switch_confirm_frames) ++p.pending_count;
+    accept = p.pending_count >= c.cfg.switch_confirm_frames &&
+        (p.cur_arrived || now(c) - p.cur_since_s >= c.cfg.switch_dwell_s);
+  }
+  if (accept && !same)
+  {
+    p.cur_point = candidate.target_point;
+    p.cur_target = candidate.target;
+    p.cur_target_valid = candidate.target_valid;
+    p.cur_operator_target = candidate.operator_target;
+    p.cur_generation = candidate.generation;
+    p.cur_since_s = now(c);
+    p.cur_arrived = false;
+  }
+  if (accept)
+  {
+    p.pending_point = -1;
+    p.pending_count = 0;
+  }
+  c.decision.target_point = p.cur_point;
+  c.decision.target = p.cur_target;
+  c.decision.target_valid = p.cur_target_valid;
+  c.decision.operator_target = p.cur_operator_target;
+  c.decision.generation = p.cur_generation;
+  return Status::SUCCESS;
+}
+
+bool needs_tunnel(const Context& c)
+{
+  return c.cfg.enable_tunnel && (c.ex.tunnel.active() ||
+      (c.decision.target_valid && c.decision.target.region != c.plan.current_region));
+}
+
+Status prepare_tunnel(Context& c)
+{
+  auto& t = c.ex.tunnel;
+  // Before crossing is committed, a new target may choose a different first tunnel.
+  if (t.active() && !t.crossing_started &&
+      (t.after_point != c.decision.target_point || t.generation != c.decision.generation))
+  {
+    cancel_owned_navigation(c);
+    const double cooldown = t.block_until_s;
+    t = {};
+    t.block_until_s = cooldown;
+  }
+  if (t.active())
+  {
+    remember_tunnel_progress(c.sense, t);
+    return Status::SUCCESS;
+  }
+  if (now(c) < t.block_until_s || !c.sense.pos_valid || !c.decision.target_valid)
+    return Status::FAILURE;
+  const auto route = route_tunnels(c.cfg, c.plan.current_region, c.decision.target.region,
+                                   &c.sense.pos);
+  if (route.empty()) return Status::FAILURE;
+  const auto& definition = c.cfg.tunnels[route.front()];
+  const int side = definition.align_region[0] == c.plan.current_region ? 0 :
+                   definition.align_region[1] == c.plan.current_region ? 1 : -1;
+  const int geometric_region = region_for_position(c.cfg, c.sense.pos);
+  if (side < 0 || dist(definition.align[0], definition.align[1]) < 1e-6 ||
+      c.ports->fold_state() == kFoldUnknown ||
+      (geometric_region >= 0 && geometric_region != c.plan.current_region))
+  {
+    tunnel_failure(c);
+    return Status::FAILURE;
+  }
+  const double along = project_param(c.sense.pos, definition.align[0], definition.align[1]);
+  const bool in_mouth = along >= 0.0 && along <= 1.0 &&
+      dist_to_segment(c.sense.pos, definition.align[0], definition.align[1]) <
+          c.cfg.in_tunnel_margin_m;
+  if (in_mouth && c.ports->fold_state() != kFoldFolded)
+  {
+    tunnel_failure(c);
+    return Status::FAILURE;
+  }
+  cancel_owned_navigation(c);
+  t.tunnel = route.front();
+  t.after_point = c.decision.target_point;
+  t.generation = c.decision.generation;
+  t.entry = definition.align[side];
+  t.exit = definition.align[1 - side];
+  t.center = definition.center;
+  t.has_center = definition.has_center;
+  t.exit_region = definition.align_region[1 - side];
+  t.crossing_started = in_mouth;
+  t.center_reached = !t.has_center;
+  if (in_mouth) t.entry_arrived_s = now(c);
+  remember_tunnel_progress(c.sense, t);
+  return Status::SUCCESS;
+}
+
+Status navigate_entry(Context& c)
+{
+  auto& t = c.ex.tunnel;
+  if (t.entry_arrived_s >= 0.0) return Status::SUCCESS;
+  if (c.ex.navigation.purpose != Purpose::tunnel_entry)
+  {
+    cancel_owned_navigation(c);
+    if (!c.ports->nav_set_goal(t.entry.x, t.entry.y))
+    {
+      tunnel_failure(c);
+      return Status::RUNNING;
+    }
+    set_request(c, Purpose::tunnel_entry, -2, t.generation);
+    return Status::RUNNING;
+  }
+  const auto state = c.ports->nav_state();
+  if (state == kGoalSuccess)
+  {
+    t.entry_arrived_s = now(c);
+    return Status::SUCCESS;
+  }
+  if (state == kGoalFailure || now(c) - c.ex.navigation.started_s >= c.cfg.nav_timeout_s)
+    tunnel_failure(c);
+  return Status::RUNNING;
+}
+
+Status request_fold(Context& c, bool fold)
+{
+  auto& t = c.ex.tunnel;
+  double& requested_s = fold ? t.fold_requested_s : t.unfold_requested_s;
+  if (requested_s < 0.0)
+  {
+    if (!c.ports->fold_set(fold))
+    {
+      tunnel_failure(c);
+      return Status::RUNNING;
+    }
+    requested_s = now(c);
+  }
+  else if (now(c) - requested_s >= c.cfg.fold_timeout_s) tunnel_failure(c);
+  return Status::RUNNING;
+}
+
+Status traverse_tunnel(Context& c)
+{
+  auto& t = c.ex.tunnel;
+  if (c.ex.navigation.purpose != Purpose::tunnel_crossing)
+  {
+    cancel_owned_navigation(c);
+    // A one-pose recovery is still an authorized folded traversal, not ordinary navigation.
+    const std::vector<Vec2> poses = t.has_center && !t.center_reached
+        ? std::vector<Vec2>{t.center, t.exit} : std::vector<Vec2>{t.exit};
+    if (!c.ports->nav_through_poses(poses))
+    {
+      tunnel_failure(c);
+      return Status::RUNNING;
+    }
+    // A synchronous rejection did not submit a task. Actual occupancy, if known,
+    // was already recorded by PrepareTunnel; accepted submissions commit ownership.
+    t.crossing_started = true;
+    set_request(c, Purpose::tunnel_crossing, -2, t.generation);
+    return Status::RUNNING;
+  }
+  const auto state = c.ports->nav_state();
+  if (state == kGoalSuccess)
+  {
+    t.exit_reached = true;
+    c.plan.current_region = t.exit_region;
+    explicit_stop(c);
+  }
+  else if (state == kGoalFailure || now(c) - c.ex.navigation.started_s >= c.cfg.nav_timeout_s)
+    tunnel_failure(c);
+  return Status::RUNNING;
+}
+
+Status submit_ordinary(Context& c)
+{
+  cancel_owned_navigation(c);
+  if (!c.ports->nav_set_goal(c.decision.target.pos.x, c.decision.target.pos.y))
+  {
+    ordinary_failure(c);
+    return Status::RUNNING;
+  }
+  set_request(c, Purpose::ordinary, c.decision.target_point, c.decision.generation);
+  tactical_outputs(c);
+  return Status::RUNNING;
+}
+} // namespace
+
 void register_nodes(BT::BehaviorTreeFactory& factory, std::shared_ptr<Context> ctx)
 {
-  factory.registerSimpleCondition(
-      "IsMatchRunning", [ctx](BT::TreeNode&) { return tick_gate(*ctx); });
-  factory.registerSimpleAction(
-      "DecideTarget", [ctx](BT::TreeNode&) { return tick_decide(*ctx); });
-  factory.registerNodeType<TunnelCross>("TunnelCross", ctx);
-  factory.registerNodeType<NavCruise>("NavCruise", ctx);
-  factory.registerNodeType<Standby>("Standby", ctx);
+  const auto action = [&](const std::string& name, std::function<Status(Context&)> callback) {
+    factory.registerBuilder<CallbackAction>(name,
+        [ctx, callback](const std::string& node_name, const BT::NodeConfig& config) {
+          return std::make_unique<CallbackAction>(node_name, config,
+              [ctx, callback] { return callback(*ctx); });
+        });
+  };
+  const auto condition = [&](const std::string& name, std::function<bool(const Context&)> callback) {
+    factory.registerSimpleCondition(name, [ctx, callback](BT::TreeNode&) {
+      return check(callback(*ctx));
+    });
+  };
+  action("ReadInputs", read_inputs);
+  condition("MatchRunning", [](const Context& c) { return c.sense.match_running; });
+  action("BeginMatch", begin_match);
+  action("Standby", standby);
+  action("UpdateHomeLatch", [](Context& c) {
+    update_home_latch(c.sense, c.cfg, c.plan); return Status::SUCCESS;
+  });
+  action("ObserveOperator", observe_operator);
+  condition("AutoBuyEnabled", [](const Context& c) { return c.cfg.enable_auto_buy; });
+  condition("AmmoPurchaseDue", [](const Context& c) {
+    return c.cfg.ammo_buy_min_shots >= 0 && c.sense.shots >= 0 &&
+      c.sense.shots < c.cfg.ammo_buy_min_shots && c.sense.coins >= c.cfg.ammo_buy_min_coins &&
+      c.sense.remote_ammo_pool != 0 && now(c) >= c.plan.buy_ammo_next_s;
+  });
+  action("BuyAmmo", [](Context& c) {
+    c.ports->buy_ammo(c.cfg.ammo_buy_rounds);
+    c.plan.buy_ammo_next_s = now(c) + c.cfg.buy_cooldown_s; return Status::SUCCESS;
+  });
+  condition("HpPurchaseDue", [](const Context& c) {
+    return c.cfg.hp_buy_ratio > 0.0 && c.sense.hp > 0 &&
+      c.sense.hp_ratio < c.cfg.hp_buy_ratio && c.sense.coins >= c.cfg.hp_buy_min_coins &&
+      c.sense.out_of_combat != 0 && now(c) >= c.plan.buy_hp_next_s;
+  });
+  action("BuyHp", [](Context& c) {
+    c.ports->buy_hp(c.cfg.hp_buy_amount);
+    c.plan.buy_hp_next_s = now(c) + c.cfg.buy_cooldown_s; return Status::SUCCESS;
+  });
+  condition("RevivePurchaseDue", [](const Context& c) {
+    return c.cfg.enable_auto_revive && c.sense.hp == 0 &&
+      now(c) >= c.plan.buy_revive_next_s;
+  });
+  condition("FreeReviveAllowed", [](const Context& c) { return c.sense.revive_available == 1; });
+  condition("PaidReviveAllowed", [](const Context& c) {
+    return c.sense.revive_available == 2 && c.sense.revive_cost >= 0 &&
+      c.sense.coins >= c.sense.revive_cost;
+  });
+  action("BuyRevive", [](Context& c) {
+    c.ports->buy_revive(); c.plan.buy_revive_next_s = now(c) + c.cfg.buy_cooldown_s;
+    return Status::SUCCESS;
+  });
+  condition("HasOperatorTarget", [](const Context& c) { return c.plan.op_active; });
+  condition("OperatorHoldElapsed", [](const Context& c) {
+    return c.plan.op_arrived_s >= 0.0 && now(c) - c.plan.op_arrived_s >= c.cfg.op_min_hold_s;
+  });
+  condition("OperatorClearElapsed", [](const Context& c) {
+    return c.plan.op_clear_since_s >= 0.0 &&
+      now(c) - c.plan.op_clear_since_s >= c.cfg.op_combat_clear_s;
+  });
+  condition("HomeLatched", [](const Context& c) { return c.plan.home_latched; });
+  action("ConsumeOperator", [](Context& c) { consume_operator(c); return Status::SUCCESS; });
+  action("SelectOperator", [](Context& c) { select_point(c, &c.plan.op_target, true); return Status::SUCCESS; });
+  action("SelectHome", [](Context& c) {
+    const auto* home = find_point_by_zone(c.cfg, kZoneHome);
+    select_point(c, home && point_usable(c.cfg, c.plan.current_region, *home) ? home : nullptr);
+    return Status::SUCCESS;
+  });
+  condition("OwnOutpostNeeds", [](const Context& c) { return c.cfg.enable_outpost && our_outpost_needs(c.sense); });
+  condition("EnemyOutpostNeeds", [](const Context& c) { return c.cfg.enable_outpost && enemy_outpost_needs(c.sense); });
+  action("SelectRetake", [](Context& c) {
+    const auto* point = pick_zone_point(c.cfg, kZoneRetake, c.plan.current_region);
+    if (!point) return Status::FAILURE;
+    select_point(c, point); return Status::SUCCESS;
+  });
+  action("SelectOutpost", [](Context& c) {
+    const auto* point = pick_zone_point(c.cfg, kZoneOutpost, c.plan.current_region);
+    if (!point) return Status::FAILURE;
+    select_point(c, point); return Status::SUCCESS;
+  });
+  action("SelectPatrol", [](Context& c) {
+    const int owned = c.ex.navigation.purpose == Purpose::ordinary ? c.ex.applied_goal : -2;
+    select_point(c, find_point(c.cfg, pick_patrol(c.sense, c.cfg, c.plan, now(c), owned)));
+    return Status::SUCCESS;
+  });
+  action("CommitTarget", commit_target);
+  condition("NeedsTunnel", needs_tunnel);
+  action("PrepareTunnel", prepare_tunnel);
+  action("TunnelQuiet", [](Context& c) {
+    c.ports->base_spin(0.0); c.ports->attack_cmd(0, 0, 0, 0); return Status::SUCCESS;
+  });
+  condition("TunnelCooldown", [](const Context& c) { return now(c) < c.ex.tunnel.block_until_s; });
+  condition("TunnelExitReached", [](const Context& c) { return c.ex.tunnel.exit_reached; });
+  condition("CrossingCommitted", [](const Context& c) { return c.ex.tunnel.crossing_started; });
+  condition("CrossingNavigationActive", [](const Context& c) {
+    return c.ex.navigation.purpose == Purpose::tunnel_crossing;
+  });
+  action("FailTunnel", [](Context& c) { tunnel_failure(c); return Status::RUNNING; });
+  condition("Folded", [](const Context& c) { return c.ports->fold_state() == kFoldFolded; });
+  condition("Unfolded", [](const Context& c) { return c.ports->fold_state() == kFoldUnfolded; });
+  action("NavigateEntry", navigate_entry);
+  action("ExplicitStop", [](Context& c) { explicit_stop(c); return Status::SUCCESS; });
+  action("WaitStopped", [](Context& c) { explicit_stop(c); return Status::RUNNING; });
+  action("RequestFold", [](Context& c) { return request_fold(c, true); });
+  action("RequestUnfold", [](Context& c) { return request_fold(c, false); });
+  action("TraverseTunnel", traverse_tunnel);
+  action("CompleteTunnel", [](Context& c) {
+    c.ex.tunnel = {}; forget_navigation(c); return Status::RUNNING;
+  });
+  condition("HasTarget", [](const Context& c) { return c.decision.target_valid; });
+  condition("OwnsOrdinaryRequest", owns_ordinary_request);
+  condition("OrdinaryFailed", [](const Context& c) {
+    const auto state = c.ports->nav_state();
+    return state == kGoalFailure || (state != kGoalSuccess &&
+      now(c) - c.ex.navigation.started_s >= c.cfg.nav_timeout_s);
+  });
+  action("FailOrdinary", [](Context& c) { ordinary_failure(c); return Status::RUNNING; });
+  condition("OrdinaryRetryBlocked", [](const Context& c) {
+    return c.ex.retry_target == c.decision.target_point &&
+      c.ex.retry_generation == c.decision.generation && now(c) < c.ex.retry_until_s;
+  });
+  action("TacticalKeep", [](Context& c) { tactical_outputs(c); return Status::RUNNING; });
+  action("SubmitOrdinary", submit_ordinary);
 }
 
-}  // namespace bbt_decide
+int step(Ports& ports, const Config& cfg, PlanState& plan, ExecState& ex, double)
+{
+  auto ctx = std::make_shared<Context>();
+  ctx->cfg = cfg;
+  ctx->ports = std::shared_ptr<Ports>(&ports, [](Ports*) {});
+  ctx->plan = plan;
+  ctx->ex = ex;
+  BT::BehaviorTreeFactory factory;
+  register_nodes(factory, ctx);
+  auto tree = factory.createTreeFromFile(BBT_TREE_PATH);
+  tree.tickOnce();
+  plan = ctx->plan;
+  ex = ctx->ex;
+  return ex.tunnel.active() ? ex.tunnel.after_point : ctx->decision.target_point;
+}
+} // namespace bbt_decide

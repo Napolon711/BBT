@@ -18,6 +18,7 @@
 //   data_source — string，"real"，"sim" = 接仿真数据（只是话题表不同）；
 //                 real 模式下一旦听到 /sentry/data_source = "sim" 立即待机（硬保护）
 //   referee_protocol — string，默认 "2027"；旧摘要仿真可显式选择 "legacy"。
+//   own_team — string，必填 red/blue，开局人工指定并固定；裁判 robot_id 仅供诊断。
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <behaviortree_cpp/bt_factory.h>
 #include <rclcpp/rclcpp.hpp>
@@ -72,6 +73,14 @@ public:
     {
       throw std::runtime_error("配置加载失败: " + err);
     }
+    rcl_interfaces::msg::ParameterDescriptor team_descriptor;
+    team_descriptor.description = "开局人工指定己方 red/blue，不使用裁判机器人 ID 核实；换边需重启";
+    team_descriptor.read_only = true;
+    const auto own_team = declare_parameter<std::string>("own_team", "", team_descriptor);
+    if (own_team != "red" && own_team != "blue")
+      throw std::invalid_argument("own_team 必填：开局指定 red 或 blue（不支持 auto）");
+    configure_own_team(loaded, own_team);
+    own_team_ = own_team;
     for (const auto& w : warns) RCLCPP_WARN(get_logger(), "配置告警: %s", w.c_str());
     ctx_ = std::make_shared<Context>();
     ctx_->cfg = loaded;
@@ -95,7 +104,17 @@ public:
     }
 
     RosPortsConfig rc;
+    rc.own_faction = own_team == "red" ? 1 : 2;
     rc.nav_goal_topic = tm.nav_goal;
+    rc.nav_through_poses_action = declare_parameter<std::string>(
+        "nav_through_poses_action", "/navigate_through_poses");
+    rc.nav_compute_path_action = declare_parameter<std::string>(
+        "nav_compute_path_action", "/compute_path_to_pose");
+    rc.nav_follow_path_action = declare_parameter<std::string>(
+        "nav_follow_path_action", "/follow_path");
+    rc.nav_tunnels = ctx_->cfg.tunnels;
+    rc.nav_regions = ctx_->cfg.regions;
+    rc.nav_region_geometry = ctx_->cfg.region_geometry;
     rc.nav_status_topic = tm.nav_status;
     rc.nav_cancel_topic = tm.nav_cancel;
     rc.odom_topic = tm.odom;
@@ -164,6 +183,7 @@ public:
     // 1 Hz 接口数据流看板：每条链路的帧数/频率/年龄/丢弃数，
     // 用来确认"仿真/实车的数据确实从真实接口进来了"
     iface_pub_ = create_publisher<std_msgs::msg::String>(tm.iface_status, 10);
+    trace_pub_ = create_publisher<std_msgs::msg::String>("/sentry/decision_trace", 10);
     iface_timer_ = create_wall_timer(std::chrono::milliseconds(1000),
                                      [this]() { publish_iface_status(); });
 
@@ -175,6 +195,8 @@ public:
 
     RCLCPP_INFO(get_logger(), "bbt_decide started: tree=%s hz=%.1f data_source=%s",
                 tree_file.c_str(), hz, data_source.c_str());
+    RCLCPP_INFO(get_logger(), "己方由开局人工设置：own_team=%s；裁判机器人 ID 不参与敌我判定",
+                own_team.c_str());
   }
 
 private:
@@ -202,12 +224,15 @@ private:
       RCLCPP_ERROR(get_logger(), "tree stopped: %s", e.what());
       return;
     }
+    publish_decision_trace();
     const int acting =
         ctx_->ex.tunnel.active() ? ctx_->ex.tunnel.after_point : ctx_->decision.target_point;
-    if (acting != last_acting_)
+    const int active_tunnel = ctx_->ex.tunnel.active() ? ctx_->ex.tunnel.tunnel : -1;
+    if (acting != last_acting_ || ctx_->decision.generation != last_generation_ ||
+        active_tunnel != last_tunnel_)
     {
       const double now = ports_->now_s();
-      const PointDef* p = acting >= 0 ? find_point(ctx_->cfg, acting) : nullptr;
+      const PointDef* p = ctx_->decision.target_valid ? &ctx_->decision.target : nullptr;
       if (ctx_->ex.tunnel.active() && ctx_->ex.tunnel.tunnel >= 0 &&
           static_cast<size_t>(ctx_->ex.tunnel.tunnel) < ctx_->cfg.tunnels.size())
       {
@@ -226,7 +251,48 @@ private:
         RCLCPP_INFO(get_logger(), "[%.1fs] 待机（比赛外静默，不发消息）", now);
       }
       last_acting_ = acting;
+      last_generation_ = ctx_->decision.generation;
+      last_tunnel_ = active_tunnel;
     }
+  }
+
+  // 仿真回放消费实际行为树/执行器状态，证明轨迹由本节点驱动。
+  void publish_decision_trace()
+  {
+    const auto& tunnel = ctx_->ex.tunnel;
+    char buf[640];
+    std::snprintf(buf, sizeof(buf),
+        "{\"seq\":%llu,\"time_s\":%.6f,\"source\":\"fallback\",\"own_team\":\"%s\","
+        "\"current_region\":%d,\"tunnel\":%d,\"applied_goal\":%d,"
+        "\"target_point\":%d,\"match_running\":%s,\"operator_target\":%s,"
+        "\"target_generation\":%llu,\"crossing_started\":%s,"
+        "\"center_reached\":%s,\"exit_reached\":%s",
+        static_cast<unsigned long long>(++trace_seq_), ports_->now_s(), own_team_.c_str(),
+        ctx_->plan.current_region, tunnel.active() ? tunnel.tunnel : -1,
+        ctx_->ex.applied_goal, ctx_->decision.target_point,
+        ctx_->ex.match_on ? "true" : "false", ctx_->decision.operator_target ? "true" : "false",
+        static_cast<unsigned long long>(ctx_->decision.generation),
+        tunnel.crossing_started ? "true" : "false", tunnel.center_reached ? "true" : "false",
+        tunnel.exit_reached ? "true" : "false");
+    std_msgs::msg::String msg;
+    msg.data = buf;
+    if (ctx_->decision.target_valid)
+    {
+      std::snprintf(buf, sizeof(buf), ",\"target_xy\":[%.6f,%.6f]",
+                    ctx_->decision.target.pos.x, ctx_->decision.target.pos.y);
+      msg.data += buf;
+    }
+    if (tunnel.active() && tunnel.tunnel >= 0 &&
+        static_cast<size_t>(tunnel.tunnel) < ctx_->cfg.tunnels.size())
+    {
+      const auto& center = ctx_->cfg.tunnels[tunnel.tunnel].center;
+      std::snprintf(buf, sizeof(buf),
+          ",\"entry\":[%.6f,%.6f],\"center\":[%.6f,%.6f],\"exit\":[%.6f,%.6f]",
+          tunnel.entry.x, tunnel.entry.y, center.x, center.y, tunnel.exit.x, tunnel.exit.y);
+      msg.data += buf;
+    }
+    msg.data += "}";
+    trace_pub_->publish(msg);
   }
 
   // 接口数据流统计 → 一行 JSON。
@@ -262,9 +328,14 @@ private:
   std::shared_ptr<RosPorts> ports_;   // 端口适配层（唯一数据进出口）
   BT::BehaviorTreeFactory factory_;   // BT 工厂：注册节点 + 从 xml 建树
   BT::Tree tree_;                     // 主行为树，每 tick 调一次 tickOnce()
-  int last_acting_ = -3;              // 上一 tick 生效目标（-3 保证启动时打一条日志）
+  int last_acting_ = -1;
+  uint64_t last_generation_ = 0;       // 任意坐标共用动态ID，靠代际识别目标变化。
+  int last_tunnel_ = -2;              // -2保证启动时记录一次。
   std::string data_source_;
+  std::string own_team_;
+  uint64_t trace_seq_ = 0;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr iface_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr trace_pub_;
   rclcpp::TimerBase::SharedPtr iface_timer_;
   rclcpp::TimerBase::SharedPtr timer_;
 };

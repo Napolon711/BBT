@@ -1,10 +1,12 @@
 // BBT ROS 适配层实现：只做"抽象动作 ↔ 话题消息"的搬运，不做任何决策。
 #include "bbt_decide/ros_ports.hpp"
+#include "bbt_decide/geometry.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 namespace bbt_decide
 {
@@ -19,7 +21,12 @@ double yaw_from_quat(double x, double y, double z, double w)
 
 RosPorts::RosPorts(rclcpp::Node* node, const RosPortsConfig& cfg) : node_(node), cfg_(cfg)
 {
+  if (cfg_.own_faction != 1 && cfg_.own_faction != 2)
+    throw std::invalid_argument("own_faction must be explicitly set to 1 (red) or 2 (blue)");
   goal_pub_ = node_->create_publisher<geometry_msgs::msg::PoseStamped>(cfg_.nav_goal_topic, 10);
+  compute_client_ = rclcpp_action::create_client<ComputePath>(node_, cfg_.nav_compute_path_action);
+  follow_client_ = rclcpp_action::create_client<FollowPath>(node_, cfg_.nav_follow_path_action);
+  through_client_ = rclcpp_action::create_client<ThroughPoses>(node_, cfg_.nav_through_poses_action);
   cancel_pub_ = node_->create_publisher<std_msgs::msg::Empty>(cfg_.nav_cancel_topic, 10);
   vel_pub_ = node_->create_publisher<geometry_msgs::msg::Twist>(cfg_.cmd_vel_topic, 10);
   mode_pub_ = node_->create_publisher<std_msgs::msg::Int32>(cfg_.chassis_mode_topic, 10);
@@ -36,8 +43,13 @@ RosPorts::RosPorts(rclcpp::Node* node, const RosPortsConfig& cfg) : node_(node),
       cfg_.nav_status_topic, 10, [this](const std_msgs::msg::Int32::SharedPtr m) {
         std::lock_guard<std::mutex> lock(mtx_);
         note_frame_locked("nav_status");
-        const int v = m->data;
-        nav_state_ = (v >= 0 && v <= 3) ? static_cast<GoalState>(v) : kGoalIdle;
+        // Legacy telemetry is observed only. It has no request UUID and cannot
+        // acknowledge either a replaced goal or an arbitrary final coordinate.
+        if (m->data < 0 || m->data > 3)
+        {
+          auto it = find_link_locked("nav_status");
+          if (it != links_.end()) ++it->dropped;
+        }
       });
 
   odom_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
@@ -56,6 +68,12 @@ RosPorts::RosPorts(rclcpp::Node* node, const RosPortsConfig& cfg) : node_(node),
         // sense() 用它判 odom 是否断流，断流后位姿按无效处理
         pose_.stamp_ms = static_cast<uint64_t>(now_s() * 1000.0);
         pose_.valid = true;
+        if (completed_exit_tunnel_ >= 0 && !segment_crosses_tunnel(
+            {cfg_.nav_tunnels[completed_exit_tunnel_]}, {pose_.x, pose_.y}, {pose_.x, pose_.y}))
+        {
+          completed_exit_tunnel_ = -1;
+          completed_exit_side_ = -1;
+        }
       });
 
   fold_state_sub_ = node_->create_subscription<std_msgs::msg::Int32>(
@@ -70,15 +88,16 @@ RosPorts::RosPorts(rclcpp::Node* node, const RosPortsConfig& cfg) : node_(node),
       cfg_.referee_topic, 10, [this](const std_msgs::msg::Float64MultiArray::SharedPtr m) {
         std::lock_guard<std::mutex> lock(mtx_);
         const auto& v = m->data;
-        // Arena 9/12, 27BT-UC 14, legacy BBT 19. Reject truncated layouts.
+        // UC has 10 mandatory fields plus optional [10..13]; bridge publishes 14.
+        // Keep historical Arena 9 and BBT 19 layouts explicitly distinguished.
         bool numeric_valid = true;
         for (size_t i = 0; i < v.size(); ++i)
         {
-          const bool timestamp = v.size() != 19 && i == 9;
+          const bool timestamp = v.size() != 19 && (i == 9 || i == 12);
           const double upper = timestamp ? double(UINT32_MAX) : double(std::numeric_limits<int>::max());
           numeric_valid &= std::isfinite(v[i]) && v[i] >= -1.0 && v[i] <= upper;
         }
-        if ((v.size() != 9 && v.size() != 12 && v.size() != 14 && v.size() != 19) ||
+        if (((v.size() < 9 || v.size() > 14) && v.size() != 19) ||
             !numeric_valid)
         {
           auto it = find_link_locked("referee");
@@ -88,6 +107,11 @@ RosPorts::RosPorts(rclcpp::Node* node, const RosPortsConfig& cfg) : node_(node),
         note_frame_locked("referee");
         ref_ = RefereeSnapshot{};
         ref_.game_progress = static_cast<int>(v[0]);
+        if (ref_.game_progress != 4)
+        {
+          completed_exit_tunnel_ = -1;
+          completed_exit_side_ = -1;
+        }
         ref_.hp = static_cast<int>(v[1]);
         ref_.hp_max = static_cast<int>(v[2]);
         ref_.shots = static_cast<int>(v[3]);
@@ -113,18 +137,12 @@ RosPorts::RosPorts(rclcpp::Node* node, const RosPortsConfig& cfg) : node_(node),
         else
         {
           ref_.stage_remain_s = v[8];
-          if (v.size() >= 12)
-          {
-            ref_.our_outpost_hp = static_cast<int>(v[5]);
-            ref_.our_outpost_ctrl = v[7] == 1.0 ? static_cast<int>(v[6]) : kCtrlUnknown;
-            ref_.our_base_hp = static_cast<int>(v[10]);
-            ref_.ally_ctrl_deg = static_cast<int>(v[11]);
-          }
-          if (v.size() == 14)
-          {
-            ref_source_age_ms_ = std::max(0.0, v[12]);
-            ref_.enemy_outpost_hp = static_cast<int>(v[13]);
-          }
+          ref_.our_outpost_hp = static_cast<int>(v[5]);
+          ref_.our_outpost_ctrl = v[7] == 1.0 ? static_cast<int>(v[6]) : kCtrlUnknown;
+          if (v.size() > 10) ref_.our_base_hp = static_cast<int>(v[10]);
+          if (v.size() > 11) ref_.ally_ctrl_deg = static_cast<int>(v[11]);
+          if (v.size() > 12) ref_source_age_ms_ = std::max(0.0, v[12]);
+          if (v.size() > 13) ref_.enemy_outpost_hp = static_cast<int>(v[13]);
         }
         if (sim_source_seen_) ref_.game_progress = 0;
       });
@@ -158,9 +176,10 @@ RosPorts::RosPorts(rclcpp::Node* node, const RosPortsConfig& cfg) : node_(node),
                             }
                             if (op_cmd_int_.seq == seq) return;
                             op_cmd_int_ = OpCmd{seq, type, m->data[1], 0.0, 0.0};
-                            op_latest_ = op_cmd_int_;
+                            auto received = op_cmd_int_;
                             if (++op_local_seq_ == 0) ++op_local_seq_;
-                            op_latest_.seq = op_local_seq_;
+                            received.seq = op_local_seq_;
+                            op_pending_.push_back(received);
                           });
   op_cmd_xy_sub_ = cfg_.op_cmd_xy_topic.empty()
                        ? nullptr
@@ -194,13 +213,17 @@ RosPorts::RosPorts(rclcpp::Node* node, const RosPortsConfig& cfg) : node_(node),
                                if (op_cmd_xy_.seq == seq) return;
                                op_cmd_xy_ = OpCmd{seq, type, static_cast<int>(m->data[1]),
                                                   m->data[3], m->data[4]};
-                               op_latest_ = op_cmd_xy_;
+                               auto received = op_cmd_xy_;
                                if (++op_local_seq_ == 0) ++op_local_seq_;
-                               op_latest_.seq = op_local_seq_;
+                               received.seq = op_local_seq_;
+                               op_pending_.push_back(received);
                              });
 
   // 发布链路注册（统计用）
   register_link("nav_goal", cfg_.nav_goal_topic, "geometry_msgs/msg/PoseStamped", true);
+  register_link("nav_compute_path", cfg_.nav_compute_path_action, "nav2_msgs/action/ComputePathToPose", true);
+  register_link("nav_follow_path", cfg_.nav_follow_path_action, "nav2_msgs/action/FollowPath", true);
+  register_link("nav_through_poses", cfg_.nav_through_poses_action, "nav2_msgs/action/NavigateThroughPoses", true);
   register_link("nav_cancel", cfg_.nav_cancel_topic, "std_msgs/msg/Empty", true);
   register_link("cmd_vel", cfg_.cmd_vel_topic, "geometry_msgs/msg/Twist", true);
   register_link("chassis_mode", cfg_.chassis_mode_topic, "std_msgs/msg/Int32", true);
@@ -266,25 +289,243 @@ RosPorts::RosPorts(rclcpp::Node* node, const RosPortsConfig& cfg) : node_(node),
 bool RosPorts::nav_set_goal(double x, double y)
 {
   if (!std::isfinite(x) || !std::isfinite(y)) return false;
+  if (!compute_client_->action_server_is_ready() || !follow_client_->action_server_is_ready())
+  {
+    RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+        "Ordinary navigation needs ComputePathToPose and FollowPath; refusing topic fallback");
+    return false;
+  }
+  const uint64_t generation = replace_navigation(kGoalRunning);
   geometry_msgs::msg::PoseStamped msg;
   msg.header.stamp = node_->now();
   msg.header.frame_id = "map";
   msg.pose.position.x = x;
   msg.pose.position.y = y;
   msg.pose.orientation.w = 1.0;  // 朝向不给，由导航自己决定
+  ComputePath::Goal goal;
+  goal.goal = msg;
+  goal.use_start = false;  // Nav2 uses its current map pose, not an invented origin.
+  rclcpp_action::Client<ComputePath>::SendGoalOptions options;
+  options.goal_response_callback = [this, generation](ComputeHandle::SharedPtr handle) {
+    bool stale;
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      stale = nav_generation_ != generation;
+      if (!stale)
+      {
+        compute_handle_ = handle;
+        if (!handle) nav_state_ = kGoalFailure;
+      }
+    }
+    if (stale && handle) compute_client_->async_cancel_goal(handle);
+  };
+  options.result_callback = [this, generation, x, y](const ComputeHandle::WrappedResult& result) {
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      if (nav_generation_ != generation) return;
+      compute_handle_.reset();
+    }
+    if (result.code != rclcpp_action::ResultCode::SUCCEEDED || !result.result ||
+        result.result->error_code != 0 || !ordinary_path_allowed(result.result->path, {x, y}))
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      if (nav_generation_ == generation) nav_state_ = kGoalFailure;
+      return;
+    }
+    follow_checked_path(result.result->path, generation);
+  };
+  compute_client_->async_send_goal(goal, options);
+  note_tx("nav_compute_path");
+  // Observation only. An executor subscribed here would bypass the checked path.
   goal_pub_->publish(msg);
   note_tx("nav_goal");
-  std::lock_guard<std::mutex> lock(mtx_);
-  nav_state_ = kGoalRunning;  // 乐观置位，之后以 /nav_status 为准
+  return true;
+}
+
+uint64_t RosPorts::replace_navigation(GoalState state)
+{
+  ComputeHandle::SharedPtr compute;
+  FollowHandle::SharedPtr follow;
+  ThroughHandle::SharedPtr through;
+  uint64_t generation;
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
+    generation = ++nav_generation_;
+    compute = std::move(compute_handle_);
+    follow = std::move(follow_handle_);
+    through = std::move(through_handle_);
+    nav_state_ = state;
+  }
+  if (compute) compute_client_->async_cancel_goal(compute);
+  if (follow) follow_client_->async_cancel_goal(follow);
+  if (through) through_client_->async_cancel_goal(through);
+  return generation;
+}
+
+bool RosPorts::ordinary_path_allowed(const nav_msgs::msg::Path& path, const Vec2& target)
+{
+  if (path.header.frame_id != "map" || path.poses.empty()) return false;
+  Config geometry;
+  geometry.regions = cfg_.nav_regions;
+  geometry.region_geometry = cfg_.nav_region_geometry;
+  const bool constrain_region = !geometry.region_geometry.empty();
+  const int target_region = constrain_region ? region_for_position(geometry, target) : -1;
+  if (constrain_region && target_region < 0) return false;
+  Vec2 previous;
+  int exit_tunnel;
+  int exit_side;
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (!pose_.valid) return false;
+    previous = {pose_.x, pose_.y};
+    exit_tunnel = completed_exit_tunnel_;
+    exit_side = completed_exit_side_;
+  }
+  std::vector<Vec2> positions{previous};
+  for (const auto& pose : path.poses)
+    positions.push_back({pose.pose.position.x, pose.pose.position.y});
+  const bool authorized_exit = exit_tunnel >= 0 && exit_tunnel < static_cast<int>(cfg_.nav_tunnels.size()) &&
+      path_clears_tunnel_exit(cfg_.nav_tunnels[exit_tunnel], exit_side, positions);
+  std::vector<TunnelDef> forbidden_tunnels;
+  for (size_t i = 0; i < cfg_.nav_tunnels.size(); ++i)
+    if (!authorized_exit || static_cast<int>(i) != exit_tunnel) forbidden_tunnels.push_back(cfg_.nav_tunnels[i]);
+  for (const auto& pose : path.poses)
+  {
+    if ((!pose.header.frame_id.empty() && pose.header.frame_id != "map") ||
+        !std::isfinite(pose.pose.position.x) || !std::isfinite(pose.pose.position.y)) return false;
+    const Vec2 current{pose.pose.position.x, pose.pose.position.y};
+    if (segment_crosses_tunnel(forbidden_tunnels, previous, current)) return false;
+    // Check continuous segments, not just sampled poses: a sparse path could
+    // otherwise leave this region via a slope and return before its next pose.
+    if (constrain_region && !segment_within_region(geometry, previous, current, target_region)) return false;
+    previous = current;
+  }
+  // The controller must execute the requested raw final coordinate. A truncated
+  // or substituted planner endpoint cannot stand in for that final target.
+  return std::hypot(previous.x - target.x, previous.y - target.y) <= 1e-6;
+}
+
+void RosPorts::follow_checked_path(const nav_msgs::msg::Path& path, uint64_t generation)
+{
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (nav_generation_ != generation) return;
+  }
+  FollowPath::Goal goal;
+  goal.path = path;
+  rclcpp_action::Client<FollowPath>::SendGoalOptions options;
+  options.goal_response_callback = [this, generation](FollowHandle::SharedPtr handle) {
+    bool stale;
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      stale = nav_generation_ != generation;
+      if (!stale)
+      {
+        follow_handle_ = handle;
+        if (!handle) nav_state_ = kGoalFailure;
+      }
+    }
+    if (stale && handle) follow_client_->async_cancel_goal(handle);
+  };
+  options.result_callback = [this, generation](const FollowHandle::WrappedResult& result) {
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (nav_generation_ != generation) return;
+    follow_handle_.reset();
+    nav_state_ = result.code == rclcpp_action::ResultCode::SUCCEEDED && result.result &&
+        result.result->error_code == 0 ? kGoalSuccess : kGoalFailure;
+  };
+  // FollowPath has no planning/replanning subtree. Every retry is replanned and
+  // rechecked above; an unchecked NavigateToPose recovery cannot create shortcuts.
+  {
+    // Do not let a concurrent cancel land between checking the generation and
+    // actually submitting this controller request.
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (nav_generation_ != generation) return;
+    follow_client_->async_send_goal(goal, options);
+  }
+  note_tx("nav_follow_path");
+}
+
+bool RosPorts::nav_through_poses(const std::vector<Vec2>& poses)
+{
+  if (poses.empty()) return false;
+  ThroughPoses::Goal goal;
+  for (const auto& p : poses)
+  {
+    if (!std::isfinite(p.x) || !std::isfinite(p.y)) return false;
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header.stamp = node_->now(); pose.header.frame_id = "map";
+    pose.pose.position.x = p.x; pose.pose.position.y = p.y;
+    pose.pose.orientation.w = 1.0;
+    goal.poses.push_back(pose);
+  }
+  if (!through_client_->action_server_is_ready())
+  {
+    RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+        "NavigateThroughPoses action unavailable: %s; refusing stop-at-centre fallback",
+        cfg_.nav_through_poses_action.c_str());
+    return false;
+  }
+  const uint64_t generation = replace_navigation(kGoalRunning);
+  int exit_tunnel = -1;
+  int exit_side = -1;
+  int exit_matches = 0;
+  for (size_t i = 0; i < cfg_.nav_tunnels.size(); ++i)
+    for (int side = 0; side < 2; ++side)
+    {
+      const auto& exit = cfg_.nav_tunnels[i].align[side];
+      if (std::hypot(poses.back().x - exit.x, poses.back().y - exit.y) <= 1e-6)
+      {
+        ++exit_matches;
+        exit_tunnel = static_cast<int>(i);
+        exit_side = side;
+      }
+    }
+  if (exit_matches != 1) exit_tunnel = -1;
+  {
+    std::lock_guard<std::mutex> lock(mtx_);
+    completed_exit_tunnel_ = -1;
+    completed_exit_side_ = -1;
+  }
+  rclcpp_action::Client<ThroughPoses>::SendGoalOptions options;
+  options.goal_response_callback = [this, generation](ThroughHandle::SharedPtr handle) {
+    bool stale;
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      stale = nav_generation_ != generation;
+      if (!stale)
+      {
+        through_handle_ = handle;
+        if (!handle) nav_state_ = kGoalFailure;
+      }
+    }
+    if (stale && handle) through_client_->async_cancel_goal(handle);
+  };
+  options.result_callback = [this, generation, exit_tunnel, exit_side](const ThroughHandle::WrappedResult& result) {
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (nav_generation_ != generation) return;
+    nav_state_ = result.code == rclcpp_action::ResultCode::SUCCEEDED && result.result &&
+        result.result->error_code == 0 ? kGoalSuccess : kGoalFailure;
+    if (nav_state_ == kGoalSuccess && exit_tunnel >= 0 &&
+        ref_.game_progress == 4 && !sim_source_seen_)
+    {
+      completed_exit_tunnel_ = exit_tunnel;
+      completed_exit_side_ = exit_side;
+    }
+    through_handle_.reset();
+    // Legacy topic statuses never acknowledge a request, including a preceding
+    // entrance goal whose success happens to arrive during this crossing.
+  };
+  through_client_->async_send_goal(goal, options);
+  note_tx("nav_through_poses");
   return true;
 }
 
 void RosPorts::nav_cancel()
 {
+  replace_navigation(kGoalIdle);
   cancel_pub_->publish(std_msgs::msg::Empty());
   note_tx("nav_cancel");
-  std::lock_guard<std::mutex> lock(mtx_);
-  nav_state_ = kGoalIdle;
 }
 
 GoalState RosPorts::nav_state()
@@ -359,14 +600,8 @@ RefereeSnapshot RosPorts::referee()
   {
     const auto fresh = [this](const char* key) { return input_age_ms_locked(key) <= cfg_.referee_stale_ms; };
     r.robot_id = fresh("robot_status") ? robot_status_.robot_id : 0;
-    const bool color_known = r.robot_id == 7 || r.robot_id == 107;
-    const bool red = r.robot_id == 7;
-    if (!color_known)
-    {
-      r.our_outpost_hp = r.enemy_outpost_hp = -1;
-      r.our_outpost_ctrl = r.enemy_outpost_ctrl = kCtrlUnknown;
-    }
-    if (color_known && fresh("robot_hp"))
+    const bool red = cfg_.own_faction == 1;
+    if (fresh("robot_hp"))
     {
       r.our_outpost_hp = red ? robot_hp_.outpost_r_hp : robot_hp_.outpost_b_hp;
       r.enemy_outpost_hp = red ? robot_hp_.outpost_b_hp : robot_hp_.outpost_r_hp;
@@ -375,7 +610,7 @@ RefereeSnapshot RosPorts::referee()
       r.ally_ctrl_deg = robot_hp_.ally_control_degree;
       r.enemy_ctrl_deg = robot_hp_.enemy_control_degree;
     }
-    if (color_known && fresh("field_event"))
+    if (fresh("field_event"))
     {
       r.our_outpost_ctrl = red ? field_event_.outpost_r_control : field_event_.outpost_b_control;
       r.enemy_outpost_ctrl = red ? field_event_.outpost_b_control : field_event_.outpost_r_control;
@@ -385,8 +620,11 @@ RefereeSnapshot RosPorts::referee()
       r.revive_available = sentry_info_.can_free_respawn ? 1 : (sentry_info_.can_buy_respawn ? 2 : 0);
       r.revive_cost = sentry_info_.respawn_cost_coin;
       r.remote_ammo_pool = sentry_info_.team_allowance_exchangeable;
-      r.out_of_combat = sentry_info_.out_of_combat ? 1 : 0;
     }
+    // Combat is a referee fact, not a purchase authorization. A slow but valid
+    // source must not reset the operator task's continuous clear interval.
+    if (std::isfinite(input_age_ms_locked("sentry_info")))
+      r.out_of_combat = sentry_info_.out_of_combat ? 1 : 0;
   }
   return r;
 }
@@ -395,7 +633,10 @@ OpCmd RosPorts::op_cmd()
 {
   std::lock_guard<std::mutex> lock(mtx_);
   // 各通道独立去重，以本机收到新指令的顺序合并，避免低序号通道永久饿死。
-  return op_latest_;
+  if (op_pending_.empty()) return {};
+  const auto next = op_pending_.front();
+  op_pending_.pop_front();
+  return next;
 }
 
 void RosPorts::buy_ammo(int rounds)
@@ -455,8 +696,6 @@ bool RosPorts::request_purchase(int kind, int amount)
   if (purchase_kind_ != 0 || now < purchase_ready_s_ || sim_source_seen_ ||
       input_age_ms_locked("referee") + ref_source_age_ms_ > cfg_.referee_stale_ms ||
       input_age_ms_locked("sentry_info") > cfg_.referee_stale_ms ||
-      input_age_ms_locked("robot_status") > cfg_.referee_stale_ms ||
-      (robot_status_.robot_id != 7 && robot_status_.robot_id != 107) ||
       ref_.game_progress != 4) return false;
   if (kind == 1 || kind == 2)
   {
@@ -614,6 +853,8 @@ void RosPorts::enable_data_source_guard()
                          cfg_.data_source_topic.c_str());
           }
           sim_source_seen_ = true;
+          completed_exit_tunnel_ = -1;
+          completed_exit_side_ = -1;
           ref_.game_progress = 0;  // 持续压住：只要 sim 还在说话，比赛状态恒为"未开始"
         }
       });

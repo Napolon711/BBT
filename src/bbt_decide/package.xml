@@ -13,6 +13,8 @@
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>nav2_msgs</depend>
+  <depend>rclcpp_action</depend>
   <depend>rm2027_interfaces</depend>
   <depend>yaml-cpp</depend>
   <depend>ament_index_cpp</depend>

@@ -11,6 +11,9 @@
 # ============================================================================
 enable_tunnel: true
 regions: [left, right]
+region_geometry:
+  - {name: left, polygon: [[0, 4], [9, 4], [9, 6], [0, 6]]}
+  - {name: right, polygon: [[11, 4], [20, 4], [20, 6], [11, 6]]}
 start_region: left
 
 field_to_map:
@@ -22,6 +25,8 @@ safety:
   ammo_home_min: 50      # 弹量 < 50 回家补给（-1 关掉弹量锁存）
   ammo_resume_min: 150
   odom_stale_ms: 1000   # 位姿 1 s 没更新 → 当无效（区域保记账）
+  op_min_hold_s: 20
+  op_combat_clear_s: 10
 
 # 自动购买（决策层自己下单；参数含义与默认值见 decision.yaml）
 auto_buy:
@@ -37,6 +42,7 @@ points:
 tunnels:
   - name: corridor_hole       # 走廊中间的洞：对正点各绑一侧区域
     center: [10.0, 5.0]
+    corners: [[9.0, 4.6], [11.0, 4.6], [11.0, 5.4], [9.0, 5.4]]
     align:
     - {p: [9.0, 5.0],  region: left}
     - {p: [11.0, 5.0], region: right}

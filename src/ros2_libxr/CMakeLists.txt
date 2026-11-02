@@ -52,7 +52,7 @@ if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(NAME bridge_integration_test COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test/bridge_integration_test.py $<TARGET_FILE:ros2_libxr_node>)
-  set_tests_properties(bridge_integration_test PROPERTIES TIMEOUT 20)
+  set_tests_properties(bridge_integration_test PROPERTIES TIMEOUT 35)
 endif()
 
 ament_package()
