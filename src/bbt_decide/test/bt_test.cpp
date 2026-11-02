@@ -6,6 +6,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "bbt_decide/bt.hpp"
@@ -67,17 +68,19 @@ struct ControlledPorts : DebugPorts
 struct TreeBench
 {
   std::shared_ptr<ControlledPorts> ports = std::make_shared<ControlledPorts>();
-  std::shared_ptr<Context> ctx = std::make_shared<Context>();
+  std::shared_ptr<const Config> config;
+  BT::Blackboard::Ptr blackboard;
   BT::Tree tree;
 
   explicit TreeBench(const Config& cfg)
   {
-    ctx->cfg = cfg;
-    ctx->ports = ports;
-    ctx->plan.current_region = cfg.start_region;
+    config = std::make_shared<const Config>(cfg);
+    PlanState plan;
+    plan.current_region = cfg.start_region;
+    blackboard = make_blackboard(config, ports, std::move(plan));
     BT::BehaviorTreeFactory factory;
-    register_nodes(factory, ctx);
-    tree = factory.createTreeFromFile(SRC_DIR "/trees/main.xml");
+    register_nodes(factory);
+    tree = factory.createTreeFromFile(SRC_DIR "/trees/main.xml", blackboard);
     ports->pose = {2.0, 5.0, 0.0, 0, true};
     ports->ref.game_progress = 4;
     ports->ref.hp = 400;
@@ -290,7 +293,7 @@ static void test_duplicate_does_not_resend_or_reset_hold()
   b.click(7.25, 7.5, 3);
   b.tick();
   CHECK(b.ports->goal_count == goals && b.ports->cancel_count == cancels);
-  CHECK(b.ports->spin_last_w == b.ctx->cfg.spin_w);
+  CHECK(b.ports->spin_last_w == b.config->spin_w);
   CHECK(b.ports->attack_last_fire == 1);
   b.tick(5.0);
   CHECK(!b.target(7.25, 7.5));
@@ -439,7 +442,7 @@ static void test_failure_waits_two_seconds_and_duplicate_does_not_clear_retry()
   CHECK(b.ports->cancel_count == cancelled);
   b.tick(0.2);
   CHECK(b.ports->goal_count == goals + 1 && b.target(7.25, 7.5));
-  CHECK(b.ports->spin_last_w == b.ctx->cfg.spin_w);
+  CHECK(b.ports->spin_last_w == b.config->spin_w);
   // A new target is not trapped by the failed target's cooldown.
   b.ports->goal = kGoalFailure;
   b.tick();
@@ -740,7 +743,7 @@ static void test_match_end_during_crossing_preserves_fold_and_clears_task()
   CHECK(b.ports->cancel_count == cancelled + 1);
   CHECK(b.ports->spin_last_w == 0 && b.ports->attack_last_fire == 0);
   CHECK(b.ports->fold == kFoldFolded && b.ports->unfold_cmd_count == 0);
-  CHECK(!b.ctx->ex.tunnel.active());
+  CHECK(!b.blackboard->get<ExecState>("execution").tunnel.active());
   const int goals = b.ports->goal_count;
   b.repeat();
   CHECK(b.ports->goal_count == goals && b.ports->stop_count == stopped + 1);

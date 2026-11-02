@@ -71,6 +71,10 @@ if(BUILD_TESTING)
   target_link_libraries(bbt_decide_bt_tests bbt_decide_bt behaviortree_cpp::behaviortree_cpp)
   add_test(NAME bbt_decide_bt_test COMMAND bbt_decide_bt_tests)
 
+  add_executable(bbt_decide_blackboard_tests test/blackboard_test.cpp)
+  target_link_libraries(bbt_decide_blackboard_tests bbt_decide_bt)
+  add_test(NAME bbt_decide_blackboard_test COMMAND bbt_decide_blackboard_tests)
+
   add_executable(bbt_decide_regression_tests test/regression_test.cpp)
   target_compile_definitions(bbt_decide_regression_tests PRIVATE SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   target_link_libraries(bbt_decide_regression_tests bbt_decide_bt)

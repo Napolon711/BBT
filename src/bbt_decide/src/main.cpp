@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "bbt_decide/bt.hpp"
 #include "bbt_decide/ros_ports.hpp"
@@ -82,10 +83,9 @@ public:
     configure_own_team(loaded, own_team);
     own_team_ = own_team;
     for (const auto& w : warns) RCLCPP_WARN(get_logger(), "配置告警: %s", w.c_str());
-    ctx_ = std::make_shared<Context>();
-    ctx_->cfg = loaded;
+    cfg_ = std::make_shared<const Config>(std::move(loaded));
     RCLCPP_INFO(get_logger(), "配置已加载: %s（点 %zu 个，洞 %zu 条）", config_file.c_str(),
-                ctx_->cfg.points.size(), ctx_->cfg.tunnels.size());
+                cfg_->points.size(), cfg_->tunnels.size());
 
     // 数据源开关：只决定用哪张话题表，数据一律经真实 ROS 话题进出
     const std::string data_source = declare_parameter<std::string>("data_source", "real");
@@ -94,7 +94,7 @@ public:
       throw std::invalid_argument("data_source 只能是 sim 或 real，收到: " + data_source);
     }
     data_source_ = data_source;
-    const TopicMap& tm = (data_source == "sim") ? ctx_->cfg.topics_sim : ctx_->cfg.topics_real;
+    const TopicMap& tm = (data_source == "sim") ? cfg_->topics_sim : cfg_->topics_real;
     {
       std::string bad;
       if (!tm.all_named(bad))
@@ -112,9 +112,9 @@ public:
         "nav_compute_path_action", "/compute_path_to_pose");
     rc.nav_follow_path_action = declare_parameter<std::string>(
         "nav_follow_path_action", "/follow_path");
-    rc.nav_tunnels = ctx_->cfg.tunnels;
-    rc.nav_regions = ctx_->cfg.regions;
-    rc.nav_region_geometry = ctx_->cfg.region_geometry;
+    rc.nav_tunnels = cfg_->tunnels;
+    rc.nav_regions = cfg_->regions;
+    rc.nav_region_geometry = cfg_->region_geometry;
     rc.nav_status_topic = tm.nav_status;
     rc.nav_cancel_topic = tm.nav_cancel;
     rc.odom_topic = tm.odom;
@@ -131,16 +131,15 @@ public:
     rc.buy_revive_topic = tm.buy_revive;
     rc.attack_cmd_topic = tm.attack_cmd;
     rc.data_source_topic = tm.data_source;
-    rc.mode_independent = ctx_->cfg.mode_independent;
+    rc.mode_independent = cfg_->mode_independent;
     const std::string referee_protocol = declare_parameter<std::string>("referee_protocol", "2027");
     if (referee_protocol != "2027" && referee_protocol != "legacy")
       throw std::invalid_argument("referee_protocol 只能是 2027 或 legacy");
     if (data_source == "real" && referee_protocol != "2027")
       throw std::invalid_argument("实车必须使用 2027 裁判协议");
     rc.referee_2027 = referee_protocol == "2027";
-    rc.fold_stale_ms = ctx_->cfg.fold_stale_ms;
+    rc.fold_stale_ms = cfg_->fold_stale_ms;
     ports_ = std::make_shared<RosPorts>(this, rc);
-    ctx_->ports = ports_;
 
     if (data_source == "sim")
     {
@@ -162,13 +161,14 @@ public:
 
     // 区域记账从开局区域起步（开赛沿会再重置；过洞完成写出口对正点的区域）。
     // enable_tunnel = false 时 regions 可以为空（region 与过洞耦合，整套不需要）。
-    ctx_->plan.current_region = ctx_->cfg.start_region;
-    if (!ctx_->cfg.regions.empty())
+    PlanState plan;
+    plan.current_region = cfg_->start_region;
+    if (!cfg_->regions.empty())
     {
       RCLCPP_INFO(get_logger(), "区域表 %zu 个，开局区域 = %s（下标 %d）",
-                  ctx_->cfg.regions.size(),
-                  ctx_->cfg.regions[ctx_->cfg.start_region].c_str(),
-                  ctx_->cfg.start_region);
+                  cfg_->regions.size(),
+                  cfg_->regions[cfg_->start_region].c_str(),
+                  cfg_->start_region);
     }
     else
     {
@@ -176,9 +176,10 @@ public:
     }
 
     // 建树：注册节点 + 从 xml 载入（节点逻辑 = planner.cpp 纯函数，树只做编排）
-    register_nodes(factory_, ctx_);
+    blackboard_ = make_blackboard(cfg_, ports_, std::move(plan));
+    register_nodes(factory_);
     factory_.registerBehaviorTreeFromFile(tree_file);
-    tree_ = factory_.createTree("Main");
+    tree_ = factory_.createTree("Main", blackboard_);
 
     // 1 Hz 接口数据流看板：每条链路的帧数/频率/年龄/丢弃数，
     // 用来确认"仿真/实车的数据确实从真实接口进来了"
@@ -203,7 +204,7 @@ private:
   // 推一拍树 + 目标点变化时打一条日志。
   void tick()
   {
-    if (data_source_ == "real" && ctx_->cfg.require_map_alignment && !ctx_->cfg.field_to_map.enabled)
+    if (data_source_ == "real" && cfg_->require_map_alignment && !cfg_->field_to_map.enabled)
     {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
                           "等待 field_to_map 标定；确认恒等变换也须显式 enabled=true");
@@ -224,22 +225,25 @@ private:
       RCLCPP_ERROR(get_logger(), "tree stopped: %s", e.what());
       return;
     }
-    publish_decision_trace();
+    const auto plan = blackboard_->get<PlanState>("plan");
+    const auto execution = blackboard_->get<ExecState>("execution");
+    const auto target = blackboard_->get<Decision>("target");
+    publish_decision_trace(plan, execution, target);
     const int acting =
-        ctx_->ex.tunnel.active() ? ctx_->ex.tunnel.after_point : ctx_->decision.target_point;
-    const int active_tunnel = ctx_->ex.tunnel.active() ? ctx_->ex.tunnel.tunnel : -1;
-    if (acting != last_acting_ || ctx_->decision.generation != last_generation_ ||
+        execution.tunnel.active() ? execution.tunnel.after_point : target.target_point;
+    const int active_tunnel = execution.tunnel.active() ? execution.tunnel.tunnel : -1;
+    if (acting != last_acting_ || target.generation != last_generation_ ||
         active_tunnel != last_tunnel_)
     {
       const double now = ports_->now_s();
-      const PointDef* p = ctx_->decision.target_valid ? &ctx_->decision.target : nullptr;
-      if (ctx_->ex.tunnel.active() && ctx_->ex.tunnel.tunnel >= 0 &&
-          static_cast<size_t>(ctx_->ex.tunnel.tunnel) < ctx_->cfg.tunnels.size())
+      const PointDef* p = target.target_valid ? &target.target : nullptr;
+      if (execution.tunnel.active() && execution.tunnel.tunnel >= 0 &&
+          static_cast<size_t>(execution.tunnel.tunnel) < cfg_->tunnels.size())
       {
         RCLCPP_INFO(get_logger(), "[%.1fs] 过洞中：%s → 对正点(%.2f, %.2f) → 之后去点 %d",
-                    now, ctx_->cfg.tunnels[ctx_->ex.tunnel.tunnel].name.c_str(),
-                    ctx_->ex.tunnel.entry.x, ctx_->ex.tunnel.entry.y,
-                    ctx_->ex.tunnel.after_point);
+                    now, cfg_->tunnels[execution.tunnel.tunnel].name.c_str(),
+                    execution.tunnel.entry.x, execution.tunnel.entry.y,
+                    execution.tunnel.after_point);
       }
       else if (p != nullptr)
       {
@@ -251,15 +255,16 @@ private:
         RCLCPP_INFO(get_logger(), "[%.1fs] 待机（比赛外静默，不发消息）", now);
       }
       last_acting_ = acting;
-      last_generation_ = ctx_->decision.generation;
+      last_generation_ = target.generation;
       last_tunnel_ = active_tunnel;
     }
   }
 
   // 仿真回放消费实际行为树/执行器状态，证明轨迹由本节点驱动。
-  void publish_decision_trace()
+  void publish_decision_trace(const PlanState& plan, const ExecState& execution,
+                              const Decision& target)
   {
-    const auto& tunnel = ctx_->ex.tunnel;
+    const auto& tunnel = execution.tunnel;
     char buf[640];
     std::snprintf(buf, sizeof(buf),
         "{\"seq\":%llu,\"time_s\":%.6f,\"source\":\"fallback\",\"own_team\":\"%s\","
@@ -268,24 +273,24 @@ private:
         "\"target_generation\":%llu,\"crossing_started\":%s,"
         "\"center_reached\":%s,\"exit_reached\":%s",
         static_cast<unsigned long long>(++trace_seq_), ports_->now_s(), own_team_.c_str(),
-        ctx_->plan.current_region, tunnel.active() ? tunnel.tunnel : -1,
-        ctx_->ex.applied_goal, ctx_->decision.target_point,
-        ctx_->ex.match_on ? "true" : "false", ctx_->decision.operator_target ? "true" : "false",
-        static_cast<unsigned long long>(ctx_->decision.generation),
+        plan.current_region, tunnel.active() ? tunnel.tunnel : -1,
+        execution.applied_goal, target.target_point,
+        execution.match_on ? "true" : "false", target.operator_target ? "true" : "false",
+        static_cast<unsigned long long>(target.generation),
         tunnel.crossing_started ? "true" : "false", tunnel.center_reached ? "true" : "false",
         tunnel.exit_reached ? "true" : "false");
     std_msgs::msg::String msg;
     msg.data = buf;
-    if (ctx_->decision.target_valid)
+    if (target.target_valid)
     {
       std::snprintf(buf, sizeof(buf), ",\"target_xy\":[%.6f,%.6f]",
-                    ctx_->decision.target.pos.x, ctx_->decision.target.pos.y);
+                    target.target.pos.x, target.target.pos.y);
       msg.data += buf;
     }
     if (tunnel.active() && tunnel.tunnel >= 0 &&
-        static_cast<size_t>(tunnel.tunnel) < ctx_->cfg.tunnels.size())
+        static_cast<size_t>(tunnel.tunnel) < cfg_->tunnels.size())
     {
-      const auto& center = ctx_->cfg.tunnels[tunnel.tunnel].center;
+      const auto& center = cfg_->tunnels[tunnel.tunnel].center;
       std::snprintf(buf, sizeof(buf),
           ",\"entry\":[%.6f,%.6f],\"center\":[%.6f,%.6f],\"exit\":[%.6f,%.6f]",
           tunnel.entry.x, tunnel.entry.y, center.x, center.y, tunnel.exit.x, tunnel.exit.y);
@@ -324,7 +329,8 @@ private:
     iface_pub_->publish(msg);
   }
 
-  std::shared_ptr<Context> ctx_;      // 全树共享黑板
+  std::shared_ptr<const Config> cfg_;  // 开局固定配置
+  BT::Blackboard::Ptr blackboard_;     // 原生黑板，XML 端口显式连接数据
   std::shared_ptr<RosPorts> ports_;   // 端口适配层（唯一数据进出口）
   BT::BehaviorTreeFactory factory_;   // BT 工厂：注册节点 + 从 xml 建树
   BT::Tree tree_;                     // 主行为树，每 tick 调一次 tickOnce()
