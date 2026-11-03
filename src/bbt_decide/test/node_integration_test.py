@@ -14,10 +14,8 @@ import yaml
 import rclpy
 from rclpy.parameter import Parameter
 from rclpy.parameter_client import AsyncParameterClient
-from rclpy.action import ActionServer
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Odometry, Path as NavPath
-from nav2_msgs.action import ComputePathToPose, FollowPath
+from nav_msgs.msg import Odometry
 from std_msgs.msg import Float64MultiArray, Int32, String
 from rm2027_interfaces.msg import RobotStatus
 
@@ -40,28 +38,7 @@ odom.pose.pose.orientation.w = 1.
 reported_id = None
 
 
-def compute_path(goal_handle):
-    """Nav2 boundary substitute; production BBT must inspect this returned path."""
-    result = ComputePathToPose.Result()
-    start = PoseStamped()
-    start.header.frame_id = 'map'
-    start.pose = odom.pose.pose
-    result.path = NavPath(poses=[start, goal_handle.request.goal])
-    result.path.header.frame_id = 'map'
-    goal_handle.succeed()
-    return result
-
-
-def follow_path(goal_handle):
-    assert goal_handle.request.path.header.frame_id == 'map'
-    assert len(goal_handle.request.path.poses) >= 2
-    goal_handle.succeed()
-    return FollowPath.Result()
-
-
-compute_server = ActionServer(node, ComputePathToPose, '/compute_path_to_pose', compute_path)
-follow_server = ActionServer(node, FollowPath, '/follow_path', follow_path)
-
+# Ordinary navigation deliberately has no planner/controller Action substitute.
 
 def pump(seconds):
     end = time.monotonic() + seconds

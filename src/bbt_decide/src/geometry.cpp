@@ -154,108 +154,12 @@ int region_for_position(const Config& cfg, const Vec2& position)
   return result;
 }
 
-bool segment_within_region(const Config& cfg, const Vec2& start, const Vec2& end, int region)
-{
-  if (!finite(start) || !finite(end) || region < 0 ||
-      region >= static_cast<int>(cfg.regions.size())) return false;
-  const auto covered = [&cfg, region](const Vec2& p) {
-    for (const auto& cell : cfg.region_geometry)
-      if (cell.name == cfg.regions[region] && containment(cell.polygon, p) >= 0) return true;
-    return false;
-  };
-  if (!covered(start) || !covered(end)) return false;
-  std::vector<double> cuts{0.0, 1.0};
-  for (const auto& cell : cfg.region_geometry)
-    if (cell.name == cfg.regions[region]) collect_segment_cuts(cell.polygon, start, end, cuts);
-  std::sort(cuts.begin(), cuts.end());
-  for (size_t i = 1; i < cuts.size(); ++i)
-  {
-    if (cuts[i] == cuts[i-1]) continue;
-    const double t = (cuts[i-1]+cuts[i]) / 2.0;
-    if (!covered({start.x + t*(end.x-start.x), start.y + t*(end.y-start.y)})) return false;
-  }
-  return true;
-}
-
 bool point_inside_tunnel(const Config& cfg, const Vec2& position)
 {
   if (!cfg.enable_tunnel) return false;
   for (const auto& tunnel : cfg.tunnels)
     if (containment(tunnel.corners, position) == 1) return true;
   return false;
-}
-
-bool segment_crosses_tunnel(const std::vector<TunnelDef>& tunnels, const Vec2& start, const Vec2& end)
-{
-  if (!finite(start) || !finite(end)) return true;
-  for (const auto& tunnel : tunnels)
-    if (segment_enters_polygon(tunnel.corners, start, end)) return true;
-  return false;
-}
-
-bool segment_crosses_tunnel(const Config& cfg, const Vec2& start, const Vec2& end)
-{
-  return cfg.enable_tunnel && segment_crosses_tunnel(cfg.tunnels, start, end);
-}
-
-bool path_clears_tunnel_exit(const TunnelDef& tunnel, int exit_side,
-                            const std::vector<Vec2>& positions)
-{
-  if ((exit_side != 0 && exit_side != 1) || positions.size() < 2 ||
-      !valid_polygon(tunnel.corners) || !finite(tunnel.align[0]) ||
-      !finite(tunnel.align[1])) return false;
-  for (const auto& point : positions) if (!finite(point)) return false;
-
-  const auto& exit = tunnel.align[exit_side];
-  const auto& entry = tunnel.align[1-exit_side];
-  const double length = std::hypot(exit.x-entry.x, exit.y-entry.y);
-  if (!std::isfinite(length) || length <= kEpsilon) return false;
-  const Vec2 axis{(exit.x-entry.x)/length, (exit.y-entry.y)/length};
-  const Vec2 center = tunnel.has_center ? tunnel.center :
-      Vec2{entry.x+(exit.x-entry.x)/2, entry.y+(exit.y-entry.y)/2};
-  if (!finite(center) || containment(tunnel.corners, center) < 0 ||
-      containment(tunnel.corners, entry) == 1 ||
-      containment(tunnel.corners, exit) == 1) return false;
-  const auto projection = [&axis, &exit](const Vec2& p) {
-    return (p.x-exit.x)*axis.x + (p.y-exit.y)*axis.y;
-  };
-  const double center_projection = projection(center);
-  double previous_projection = projection(positions.front());
-  if (!std::isfinite(center_projection) || !std::isfinite(previous_projection) ||
-      previous_projection < center_projection-kEpsilon ||
-      containment(tunnel.corners, positions.front()) != 1) return false;
-
-  bool left_tunnel = false;
-  const auto inspect = [&](const Vec2& point) {
-    const int location = containment(tunnel.corners, point);
-    const double along = projection(point);
-    if (!std::isfinite(along)) return false;
-    if (left_tunnel) return location != 1;
-    if (along < previous_projection-kEpsilon) return false;
-    previous_projection = along;
-    if (location == 1) return true;
-    // Inspect the first boundary contact, not just an outside path sample:
-    // a diagonal side exit must not be mistaken for crossing the exit plane.
-    if (std::abs(along) > kEpsilon) return false;
-    left_tunnel = true;
-    return true;
-  };
-  for (size_t i = 1; i < positions.size(); ++i)
-  {
-    const auto& a = positions[i-1];
-    const auto& b = positions[i];
-    std::vector<double> cuts{0.0, 1.0};
-    collect_segment_cuts(tunnel.corners, a, b, cuts);
-    std::sort(cuts.begin(), cuts.end());
-    cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
-    const auto at = [&a, &b](double t) {
-      return Vec2{a.x+t*(b.x-a.x), a.y+t*(b.y-a.y)};
-    };
-    for (size_t cut = 1; cut < cuts.size(); ++cut)
-      if (!inspect(at((cuts[cut-1]+cuts[cut])/2)) || !inspect(at(cuts[cut])))
-        return false;
-  }
-  return left_tunnel && containment(tunnel.corners, positions.back()) != 1;
 }
 
 bool validate_geometry(const Config& cfg, std::string& error)

@@ -1,6 +1,6 @@
 # BBT 消费 27BT-UC 的接口子集
 
-导航执行契约：当前检出的UC只有单点 `/goal_pose`，不足以保证任意坐标的安全过洞和回执归属。BBT普通导航先调用标准 `ComputePathToPose`，逐段审核返回路径没有进入未经授权的洞体，再用 `FollowPath`执行这条固定路径；过洞使用 `NavigateThroughPoses`一次提交中心与出口。三项标准Nav2 Action均须补接，不能只接旧UC单点执行器。共享裁判消息、话题字段和电控线格式继续兼容UC；导航执行方式有上述明确扩展。
+导航执行契约：普通导航恢复本机 UC 的 `/goal_pose`最终目标、`/nav_status`状态、`/nav_cancel`取消话题；BBT不获取普通规划路径，不依赖 `ComputePathToPose` 或 `FollowPath`。跨区仍按洞连接图处理，折叠后用标准 `NavigateThroughPoses`一次提交中心与出口；该Action的实机server和连续通过效果尚未确认。全部对外类型、字段和固件缺口见[接口审查](interfaces/README.md)。
 
 其他组保持 27BT-UC 的全量数据输出。BBT 直接连接其中需要的话题，不要求发送方改消息类型、重排字段或裁剪载荷。两个决策程序使用相同输出口，应选一个运行；同一物理串口只开一个桥。
 
@@ -17,7 +17,7 @@ BBT原有zone用途标签保持不变，正式巡逻通过 `patrol_point_ids: [2
 | UC 话题 | 消息 | BBT 取用内容 |
 |---|---|---|
 | `/odom` | `nav_msgs/Odometry` | map系位置，接收时刻用于位姿时效 |
-| `/nav_status` | `std_msgs/Int32` | 兼容观测的0空闲/1运行/2到达/3失败；不作为Action完成依据 |
+| `/nav_status` | `std_msgs/Int32` | 0空闲/1运行/2到达/3失败；确认普通目标，不决定过洞Action完成 |
 | `/gimbal_fold_state` | `std_msgs/Int32` | 0未知/1折叠中/2折叠完成/3展开中/4展开完成 |
 | `/referee/summary` | `std_msgs/Float64MultiArray` | UC的10–14元素摘要，额外字段按长度取用 |
 | `/referee/robot_hp` | `rm2027_interfaces/RobotHP` | 双方前哨HP、基地、控制度；人工阵营选敌我 |
@@ -34,8 +34,8 @@ UC标准摘要基础布局：`[game_progress,hp,hp_max,shots,coins,own_outpost_h
 
 | 话题 | 消息/含义 |
 |---|---|
-| `/goal_pose` | `geometry_msgs/PoseStamped`，map目标观测；不得另接旧单点导航执行器 |
-| `/nav_cancel` | `std_msgs/Empty`，兼容取消通知；BBT另外取消自己持有的Action Goal |
+| `/goal_pose` | `geometry_msgs/PoseStamped`，map系本段最终目标；外部导航执行普通任务 |
+| `/nav_cancel` | `std_msgs/Empty`，取消普通导航；BBT另外取消自己持有的过洞Action Goal |
 | `/cmd_vel` | `geometry_msgs/Twist`，BBT只发停车，巡航速度由导航发 |
 | `/move_mode` | `std_msgs/Int32`，0 RELAX / 1 INDEPENDENT / 2 ROTOR / 3 FOLLOW |
 | `/cmd_spin` | `std_msgs/Float32`，rad/s |
@@ -44,27 +44,25 @@ UC标准摘要基础布局：`[game_progress,hp,hp_max,shots,coins,own_outpost_h
 | `/referee/sentry_command` | `rm2027_interfaces/SentryCommand`，唯一实际购买执行口 |
 | `/sentry/buy_ammo`、`/sentry/buy_hp` | `std_msgs/Int32`，仅意图观测 |
 
-桥与UC共用SharedTopic的ref_frame/ref_tx/chassis_state/chassis_data/chassis_mode/fold_cmd及其线格式，不需要下位机另增BBT私有载荷。19个rm2027消息定义按字段、顺序与常量比较和UC相同。
+BBT桥采用本机UC上位机快照的SharedTopic名称及线格式；19个rm2027消息定义的字段、顺序和常量也与该快照一致。但被查电控快照没有注册 `ref_frame/ref_tx/chassis_state/fold_cmd`，底盘速度与旋转语义也有差异，不能据此声称已与实机兼容，详见[电控审查](interfaces/electrical-wire.md)。
 
-## 必需的导航Action
+## 普通导航与过洞的执行边界
+
+普通任务只发布本段最终目标，不添加避障途经目标或中途停靠。外部导航自行规划、避障，内部路径不经上述接口回传；BBT不逐线段审核，也不能保证实际路径全程位于某region。BBT仍检查目标区域，必要时按洞连接图选择过洞流程；洞入口及最终原坐标都使用普通目标话题。
+
+普通导航单次25秒超时，失败后冷却2秒重试同一目标。`/nav_status`没有Goal身份，迟到旧终态无法完全隔离；必须只有一个导航执行端，协调当前目标、取消和停车。不要把本地状态清理描述成对旧回执的完整防护。
 
 | 默认名称 | 标准类型 | 契约与节点参数 |
 |---|---|---|
-| `/compute_path_to_pose` | `nav2_msgs/action/ComputePathToPose` | 规划普通目标；`nav_compute_path_action`可改名 |
-| `/follow_path` | `nav2_msgs/action/FollowPath` | 只跟踪审核通过的固定路径；`nav_follow_path_action`可改名 |
-| `/navigate_through_poses` | `nav2_msgs/action/NavigateThroughPoses` | 只用于已批准的当前洞穿越；`nav_through_poses_action`可改名 |
+| `/navigate_through_poses` | `nav2_msgs/action/NavigateThroughPoses` | 仅用于当前洞穿越；`nav_through_poses_action`可改名；实机接通待验证 |
 
-普通路径从当前位置起每一段都检查位于目标region的多边形并集内、且不与未授权洞体相交，不能只检查离散路径点或终点region，也不能穿出本region后再返回。`FollowPath`不得在执行时绕过审核另行重规划；失败后由BBT冷却、重新调用规划并重新审核。Action服务缺失、拒绝、路径为空或检查不通过时停车，不回退到 `/goal_pose`执行。入口及最终原坐标也走这条普通导航链。
+过洞先确认折叠，再提交 `[center,exit]`；center取显式配置，中心不停留且无单独成功。新鲜定位确认已过中心后恢复只提交 `[exit]`，无center的简单走廊也只提交出口。过洞Action按Goal身份和请求代际管理，普通 `/nav_status`不决定其完成；这不改变普通话题状态无法识别目标的限制。出口到位停车并展开后，直接发原任务目标，不加出口外扩0.55米点。
 
-出口在洞体边界且导航有到达容差，成功回执时实际位置可能仍稍在洞内。仅凭当前指定洞的成功穿越事实，允许后续路径的开头沿该出口向外清出；反向、离开后再入、穿过其他洞仍拒绝，region整段约束保持。此授权保存的是物理完成证据，不是新阶段状态机。
-
-过洞先确认折叠，再提交 `[center,exit]`；中心不停留、不产生单独成功。已确认过中心后的恢复只提交 `[exit]`，无中心的简单走廊也只提交出口。取消和回执按Action Goal身份及任务代际隔离，旧规划、旧跟踪或旧穿越结果不得完成新目标。`/nav_status`迟到成功不会覆盖这些Action结果。必须关闭旧 `/goal_pose`执行器，避免它与BBT持有的Action任务并行输出速度；导航端响应取消后须停止旧任务速度。
-
-BBT明确停车时取消其导航、发零 `/cmd_vel`并停自旋；战术到点保持仍允许自旋和攻击，不按故障停车处理。入口折叠等待、出口展开等待、失败冷却、空目标及比赛结束均属于明确停车。
+唯一执行端须协调普通话题任务与过洞Action，避免并行发速度；响应取消后停止旧任务输出。BBT明确停车时取消其导航、发零 `/cmd_vel`并停自旋；入口折叠等待、出口展开等待、失败冷却、空目标及比赛结束均停车，到点战术保持仍允许自旋和攻击。Arena的同名Action是仿真替身，不能证明真实Nav2接通。
 
 ## 可选输入与诊断扩展
 
-保留BBT已有的 `/referee/operator_cmd` Float64 `[type,param,seq,x,y]`坐标指点、`/sentry/operator_point` Int32点ID测试输入。它们是可选功能，不需要其他组为了基础保底决策另外发布。BBT桥保留对0x0303小地图点击的解析，决策只处理导航type=4。任意坐标不要求存在于点表，不吸附到1.5米内的预设点；有效归属由区域几何确定，必要时穿洞后继续去原坐标。洞体内部或归属不明确的终点静默拒绝。
+保留BBT已有的 `/referee/operator_cmd` Float64 `[type,param,seq,x,y]`坐标指点、`/sentry/operator_point` Int32点ID测试输入。它们是可选功能，不需要其他组为了基础保底决策另外发布。BBT桥保留对0x0303小地图点击的解析，决策只处理导航type=4。用户确认裁判点击以红方侧为原点；官方协议段列float XY米制，未单独重述原点。当前BBT点击只做一次 `field_to_map`。蓝方导航map与裁判坐标的实际关系仍待确认，不能用战术模板换边推断点击是否旋转。任意坐标不要求存在于点表，不吸附到1.5米内的预设点；有效归属由区域几何确定，必要时穿洞后继续去原坐标。洞体内部或归属不明确的终点静默拒绝。
 
 人工输入按本地接收顺序排队消费，无效坐标或购买类型不能吞掉前一个有效导航坐标。关闭过洞并合法省略region/几何时，有限数值原始XY直接交给导航判断可达性；配置了几何时仍严格要求唯一归属。
 

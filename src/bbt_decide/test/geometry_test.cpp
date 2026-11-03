@@ -53,15 +53,6 @@ void arbitrary_coordinates_and_tunnel_interior()
   CHECK(point_inside_tunnel(cfg, {10, 5}));
   CHECK(!point_inside_tunnel(cfg, {9, 5}));  // entry is an admissible stopping point
   CHECK(!point_inside_tunnel(cfg, {8, 5}));
-  CHECK(segment_crosses_tunnel(cfg, {8, 5}, {12, 5}));
-  CHECK(segment_crosses_tunnel(cfg, {10, 5}, {12, 5}));
-  CHECK(!segment_crosses_tunnel(cfg, {8, 5}, {9, 5}));
-  CHECK(!segment_crosses_tunnel(cfg, {8, 4.5}, {12, 4.5}));
-  CHECK(!segment_crosses_tunnel(cfg, {8, 3}, {12, 3}));
-  auto concave = cfg;
-  concave.tunnels[0].corners = {{2,2},{4,2},{4,4},{3,4},{3,3},{2,3}};
-  CHECK(segment_crosses_tunnel(concave, {1,2.5}, {5,2.5}));
-  CHECK(!segment_crosses_tunnel(concave, {1,3.5}, {2.9,3.5}));
 }
 
 void malformed_geometry_is_rejected()
@@ -99,105 +90,6 @@ void same_region_cells_and_legacy_ids()
   std::string error;
   CHECK(validate_geometry(cfg, error));
   CHECK(region_for_position(cfg, {1.5,1.5}) == 0);
-}
-
-void navigation_segments_stay_in_the_selected_region()
-{
-  Config cfg;
-  cfg.regions = {"route", "other"};
-  cfg.region_geometry = {
-      {"route", {{0,0},{4,0},{4,2},{0,2}}},
-      {"route", {{4,0},{10,0},{10,2},{4,2}}}};
-  CHECK(segment_within_region(cfg, {0.5,1}, {9.5,1}, 0));
-  CHECK(segment_within_region(cfg, {0.5,0}, {9.5,0}, 0)); // boundary is in the closed union
-  CHECK(!segment_within_region(cfg, {0.5,1}, {10.5,1}, 0));
-  CHECK(!segment_within_region(cfg, {0.5,1}, {9.5,1}, 1));
-  CHECK(!segment_within_region(cfg, {NAN,1}, {9.5,1}, 0));
-  CHECK(!segment_within_region(cfg, {0.5,1}, {9.5,1}, -1));
-
-  // Endpoints in the same region are insufficient: the full sparse path must
-  // reject even a narrow uncovered/foreign strip between its endpoint samples.
-  cfg.region_geometry[1].polygon = {{4.0001,0},{10,0},{10,2},{4.0001,2}};
-  CHECK(!segment_within_region(cfg, {0.5,1}, {9.5,1}, 0));
-  cfg.region_geometry.push_back({"other", {{4,0},{4.0001,0},{4.0001,2},{4,2}}});
-  CHECK(!segment_within_region(cfg, {0.5,1}, {9.5,1}, 0));
-  CHECK(!segment_within_region(cfg, {0.5,0}, {9.5,0}, 0));
-  cfg.region_geometry.back().name = "route";
-  CHECK(segment_within_region(cfg, {0.5,1}, {9.5,1}, 0));
-  CHECK(segment_within_region(cfg, {0.5,0}, {9.5,0}, 0));
-
-  cfg.region_geometry = {{"route", {{0,0},{4,0},{4,4},{3,4},{3,1},{1,1},{1,4},{0,4}}}};
-  CHECK(!segment_within_region(cfg, {0.5,3}, {3.5,3}, 0)); // concave cutout
-  CHECK(segment_within_region(cfg, {0.5,0.5}, {3.5,0.5}, 0));
-}
-
-void completed_traversal_only_clears_its_authorized_exit()
-{
-  TunnelDef tunnel;
-  tunnel.corners = {{9.82,3.5},{8.82,3.5},{8.82,1},{9.82,1}};
-  tunnel.align[0] = {9.32,3.5};
-  tunnel.align[1] = {9.32,1};
-  tunnel.center = {9.32,2.15};
-  tunnel.has_center = true;
-  const Vec2 actual{9.3200002936,1.0202299563};
-  CHECK(path_clears_tunnel_exit(tunnel, 1,
-      {actual, actual, {9.32,.45}, {11.37,.66}}));
-  CHECK(path_clears_tunnel_exit(tunnel, 1, {{9.32,2.15},{9.32,.45}}));
-  CHECK(path_clears_tunnel_exit(tunnel, 0, {{9.32,3.3},{9.32,4},{8,4}}));
-  CHECK(!path_clears_tunnel_exit(tunnel, 1, {{9.32,2.2},{9.32,.45}}));
-  CHECK(!path_clears_tunnel_exit(tunnel, 1, {actual,{9.32,1.1},{9.32,.45}}));
-  CHECK(!path_clears_tunnel_exit(tunnel, 1, {actual,{10.5,1.01},{9.32,.45}}));
-  CHECK(!path_clears_tunnel_exit(tunnel, 1, {actual,{9.32,.45},actual,{11.37,.66}}));
-  CHECK(!path_clears_tunnel_exit(tunnel, 1, {actual,{9.32,.45},{9.32,4}}));
-  CHECK(!path_clears_tunnel_exit(tunnel, 0, {actual,{9.32,.45}}));
-  CHECK(path_clears_tunnel_exit(tunnel, 1, {actual,{9.32,1}})); // raw final may be the exit boundary
-  CHECK(!path_clears_tunnel_exit(tunnel, 1, {{9.32,1},{9.32,.45}})); // start on boundary
-  CHECK(!path_clears_tunnel_exit(tunnel, 1, {{9.32,.9},{9.32,.45}}));
-  CHECK(!path_clears_tunnel_exit(tunnel, 1, {actual}));
-  CHECK(!path_clears_tunnel_exit(tunnel, 1, {}));
-  CHECK(!path_clears_tunnel_exit(tunnel, -1, {actual,{9.32,.45}}));
-  CHECK(!path_clears_tunnel_exit(tunnel, 2, {actual,{9.32,.45}}));
-  CHECK(!path_clears_tunnel_exit(tunnel, 1, {actual,{NAN,.45}}));
-
-  auto no_center = tunnel;
-  no_center.has_center = false;
-  CHECK(!path_clears_tunnel_exit(no_center, 1, {{9.32,2.3},{9.32,.45}}));
-  CHECK(path_clears_tunnel_exit(no_center, 1, {{9.32,2.2},{9.32,.45}}));
-  for (int malformed = 0; malformed < 6; ++malformed)
-  {
-    auto invalid = tunnel;
-    if (malformed == 0) invalid.align[0] = invalid.align[1];
-    if (malformed == 1) invalid.align[1].x = NAN;
-    if (malformed == 2) invalid.center.y = NAN;
-    if (malformed == 3) invalid.corners = {{0,0},{1,1},{2,2}};
-    if (malformed == 4) invalid.center = {0,0};
-    if (malformed == 5) invalid.align[1] = {9.32,1.01};
-    CHECK(!path_clears_tunnel_exit(invalid, 1, {actual,{9.32,.45}}));
-  }
-
-  // A sparse segment can leave a concave tunnel and re-enter before its final
-  // sample. Endpoints alone must not authorize that hidden side excursion.
-  TunnelDef concave;
-  concave.corners = {{0,0},{4,0},{4,1},{2,1},{2,2},{4,2},{4,3},{0,3}};
-  concave.align[0] = {0,.5};
-  concave.align[1] = {4,.5};
-  concave.center = {1,.5};
-  concave.has_center = true;
-  CHECK(!path_clears_tunnel_exit(concave, 1, {{3,.5},{3,2.5},{5,2.5}}));
-  concave.align[0] = {0,1.5};
-  concave.align[1] = {2,1.5};
-  concave.center = {.5,1.5};
-  CHECK(path_clears_tunnel_exit(concave, 1, {{1.5,1.5},{2.5,1.5}}));
-  CHECK(!path_clears_tunnel_exit(concave, 1, {{1.5,1.5},{5,2.5}}));
-
-  // Clearance is invariant under the same rigid map transform as the tunnel.
-  const FrameTransform transform{true,3.25,-4.75,37};
-  for (auto& corner : tunnel.corners) corner = apply_frame_transform(corner, transform);
-  for (auto& align : tunnel.align) align = apply_frame_transform(align, transform);
-  tunnel.center = apply_frame_transform(tunnel.center, transform);
-  std::vector<Vec2> transformed{actual,actual,{9.32,.45},{11.37,.66}};
-  for (auto& position : transformed) position = apply_frame_transform(position, transform);
-  CHECK(path_clears_tunnel_exit(tunnel, 1, transformed));
 }
 
 void frame_and_team_transform_every_geometry()
@@ -238,26 +130,16 @@ void road_to_central_ground_seams_remain_in_mid()
     const auto deployed = [team](Vec2 point) {
       return std::string(team) == "blue" ? Vec2{28-point.x, 15-point.y} : point;
     };
-    // Captured post-exit plan from the stalled demo. The road and the central
-    // slope differ by 4 mm at their seam; that ground must keep the mid label.
-    const std::vector<Vec2> path{{9.319998042489422, 1.0210346013193874},
-        {9.32, .45}, {11.716, 2.86}, {12.253446250469228, 6.771680015377857}, {15.69, 10.9}};
-    const int mid = region_for_position(cfg, deployed(path.back()));
+    const int mid = region_for_position(cfg, deployed({15.69, 10.9}));
     CHECK(mid >= 0 && cfg.regions[mid] == "mid");
-    for (size_t i = 1; i < path.size(); ++i)
-      CHECK(segment_within_region(cfg, deployed(path[i-1]), deployed(path[i]), mid));
     CHECK(region_for_position(cfg, deployed({10.95, 2.092})) == mid);
     CHECK(region_for_position(cfg, deployed({17.05, 12.908})) == mid);
-    CHECK(segment_within_region(cfg, deployed({17.05, 12.90}), deployed({17.05, 12.915}), mid));
-    // The neighboring low region, its shared boundary and all tunnel bodies
-    // retain their existing meaning; this is not a general cross-region permit.
+    // Neighboring low cells and ambiguous shared boundaries retain their labels.
     const int red_low = region_for_position(cfg, deployed({13.5, 2.085}));
     const int blue_low = region_for_position(cfg, deployed({14.5, 12.915}));
     CHECK(red_low >= 0 && cfg.regions[red_low] == "own_low");
     CHECK(blue_low >= 0 && cfg.regions[blue_low] == "enemy_low");
     CHECK(region_for_position(cfg, deployed({13.5, 2.09})) == -1);
-    CHECK(!segment_within_region(cfg, deployed({13.5, 2.07}), deployed({13.5, 2.10}), mid));
-    CHECK(segment_crosses_tunnel(cfg, deployed({9.32, .45}), deployed({9.32, 3.6})));
     CHECK(validate_geometry(cfg, error));
   }
 }
@@ -375,8 +257,6 @@ int main()
   arbitrary_coordinates_and_tunnel_interior();
   malformed_geometry_is_rejected();
   same_region_cells_and_legacy_ids();
-  navigation_segments_stay_in_the_selected_region();
-  completed_traversal_only_clears_its_authorized_exit();
   frame_and_team_transform_every_geometry();
   shipped_geometry_loads();
   road_to_central_ground_seams_remain_in_mid();

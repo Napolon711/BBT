@@ -10,7 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Empty
 from arena.bridge import InterfaceBridge
-from arena.support import FrameMap
+from arena import support
+from arena.support import FrameMap, NavController
 
 
 class RecordingPublisher:
@@ -22,6 +23,9 @@ class RecordingPublisher:
 
 
 class StubNode:
+    def __init__(self):
+        self.actions = []
+
     def create_publisher(self, *_):
         return RecordingPublisher()
 
@@ -35,18 +39,14 @@ class StubNode:
 
 class CallbackActionServer:
     def __init__(self, node, action, name, **callbacks):
+        node.actions.append(name)
         self.callbacks = callbacks
 
 
 class ActionHandle:
-    def __init__(self, points, path=False):
+    def __init__(self, points):
         poses = [pose(*point) for point in points]
         self.request = SimpleNamespace(poses=poses)
-        if path:
-            from nav_msgs.msg import Path
-            self.request.path = Path()
-            self.request.path.header.frame_id = 'map'
-            self.request.path.poses = poses
         self.is_cancel_requested = False
         self.status = None
 
@@ -85,6 +85,9 @@ def finish(coroutine):
 
 
 class NavigationContractTests(unittest.TestCase):
+    def test_only_configured_tunnel_route_has_a_simulated_action_server(self):
+        self.assertEqual(bridge().node.actions, ['/navigate_through_poses'])
+
     def test_action_canceled_before_execution_cannot_install_a_goal(self):
         adapter = bridge()
         handle = ActionHandle([(2., 4.), (2., 5.)])
@@ -115,11 +118,46 @@ class NavigationContractTests(unittest.TestCase):
         self.assertEqual(adapter.route_server.callbacks['goal_callback'](request),
                          GoalResponse.REJECT)
 
-    def test_goal_pose_is_observation_only(self):
+    def test_goal_pose_executes_only_the_requested_final_goal(self):
         adapter = bridge()
         adapter.on_goal(pose(2, 3))
+        self.assertEqual(adapter.orders()[0], (2., 3.))
+        adapter.on_goal(pose(7, 8))
+        self.assertEqual(adapter.orders()[0], (7., 8.))
+        self.assertEqual(adapter.goal_events[-1]['xy'], [7., 8.])
+
+    def test_topic_cancel_stops_and_removes_pending_goal_before_replacement(self):
+        adapter = bridge()
+        adapter.on_goal(pose(2, 3))
+        adapter.on_cancel(Empty())
         self.assertIsNone(adapter.orders()[0])
-        self.assertEqual(adapter.goal_events[-1]['xy'], [2., 3.])
+        self.assertEqual(adapter.pub_velocity.messages[-1].linear.x, 0.)
+        self.assertEqual(adapter.pub_velocity.messages[-1].linear.y, 0.)
+        adapter.on_goal(pose(7, 8))
+        self.assertEqual(adapter.orders()[0], (7., 8.))
+
+    def test_topic_request_starts_before_immediate_terminal_result(self):
+        adapter = bridge()
+        adapter.on_goal(pose(2, 3))
+        self.assertEqual([msg.data for msg in adapter.pub_nav.messages], [1])
+
+    def test_topic_goal_supersedes_tunnel_action_before_its_cancel_arrives(self):
+        adapter = bridge()
+        handle = ActionHandle([(2., 4.), (2., 5.)])
+        action = adapter.route_server.callbacks['execute_callback'](handle)
+        done = action.send(None)
+        try:
+            adapter.on_goal(pose(7, 8))
+            self.assertEqual(adapter.orders()[0], (7., 8.))
+            self.assertTrue(done.done())
+            adapter.route_server.callbacks['cancel_callback'](handle)
+            self.assertEqual(adapter.orders()[0], (7., 8.))
+        finally:
+            if not done.done():
+                done.set_result(False)
+            finish(action)
+        self.assertEqual(handle.status, 'aborted')
+        self.assertEqual(adapter.orders()[0], (7., 8.))
 
     def test_cancel_removes_already_queued_goal_but_allows_later_goal(self):
         adapter = bridge()
@@ -140,6 +178,19 @@ class NavigationContractTests(unittest.TestCase):
         self.assertEqual(adapter.orders()[0], (2., 3.))
         done.set_result(False)
         finish(replacement)
+
+    def test_old_action_cancel_cannot_remove_subsequent_topic_goal(self):
+        adapter = bridge()
+        handle = ActionHandle([(2., 4.), (2., 5.)])
+        action = adapter.route_server.callbacks['execute_callback'](handle)
+        action.send(None)
+        adapter.route_server.callbacks['cancel_callback'](handle)
+        adapter.on_goal(pose(7, 8))
+        try:
+            adapter.route_server.callbacks['cancel_callback'](handle)
+            self.assertEqual(adapter.orders()[0], (7., 8.))
+        finally:
+            finish(action)
 
     def test_old_goal_result_cannot_complete_new_route_or_emit_old_velocity(self):
         adapter = bridge()
@@ -175,59 +226,52 @@ class NavigationContractTests(unittest.TestCase):
             route.close()
             finish(old_route)
 
-    def test_fixed_path_action_waits_for_physical_controller_completion(self):
+    def test_tunnel_route_waits_for_final_exit_controller_completion(self):
         adapter = bridge()
-        handle = ActionHandle([(2., 3.), (3., 3.), (3., 5.)], path=True)
-        action = adapter.path_server.callbacks['execute_callback'](handle)
+        handle = ActionHandle([(2., 4.), (2., 5.)])
+        action = adapter.route_server.callbacks['execute_callback'](handle)
         done = action.send(None)
         monitor = SimpleNamespace(crossing=lambda *_: None, corridors=[],
                                   is_alignment=lambda _: False)
 
         class PhysicalController:
             state = 1
-            paths = []
+            goals = []
 
-            def update(self, *_args, **kwargs):
-                self.paths.append(kwargs['fixed_path'])
+            def update(self, goal, *_args, **_kwargs):
+                self.goals.append(goal)
                 return 0., 1.
 
         controller = PhysicalController()
         adapter.navigation(controller, monitor, {'x': 2., 'y': 12.}, {})
         self.assertFalse(done.done())
-        self.assertEqual(controller.paths, [[(2., 3.), (3., 3.), (3., 5.)]])
+        self.assertEqual(controller.goals, [(2., 5.)])
         controller.state = 2
         adapter.navigation(controller, monitor, {'x': 3., 'y': 10.}, {})
         finish(action)
         self.assertEqual(handle.status, 'succeeded')
 
-    def test_compute_path_returns_complete_map_path_from_navigation_observation(self):
+    def test_ordinary_goal_status_tracks_observed_motion(self):
         adapter = bridge()
         monitor = SimpleNamespace(crossing=lambda *_: None, corridors=[],
                                   is_alignment=lambda _: False)
+        controller = NavController(FrameMap('red'))
+        robot = {'x': 1., 'y': 12., 'vx': 0., 'vy': 0., 'team': 'red'}
 
-        class PhysicalPlanner:
-            state = 0
+        class OpenArenaSDK:
+            def _prepare_chapter4(self, *_):
+                return [], [], lambda *_: True, lambda *_: set()
 
-            def update(self, *_args, **_kwargs):
-                return 0., 0.
-
-            def plan(self, goal, robot, arena):
-                self.request = goal, robot, arena
-                return [(2., 12.), (4., 12.), (4., 10.)]
-
-        planner = PhysicalPlanner()
-        robot = {'x': 2., 'y': 12.}
-        arena = {'layout_revision': 'observed-map'}
-        adapter.navigation(planner, monitor, robot, arena)
-        handle = ActionHandle([])
-        handle.request = SimpleNamespace(goal=pose(4, 5), use_start=False)
-        result = finish(adapter.planner_server.callbacks['execute_callback'](handle))
-        self.assertEqual(handle.status, 'succeeded')
-        self.assertEqual(result.path.header.frame_id, 'map')
-        self.assertEqual([(p.pose.position.x, p.pose.position.y) for p in result.path.poses],
-                         [(2., 3.), (4., 3.), (4., 5.)])
-        self.assertEqual(planner.request, ((4., 5.), robot, arena))
-        self.assertIsNone(adapter.orders()[0], 'planning must not start motion')
+        adapter.on_goal(pose(2, 3))
+        with patch.object(support, 'sdk', OpenArenaSDK()):
+            adapter.navigation(controller, monitor, robot, {})
+            self.assertGreater(adapter.pub_velocity.messages[-1].linear.x, 0.)
+            robot.update(x=2., vx=.4)
+            adapter.navigation(controller, monitor, robot, {})
+            robot['vx'] = 0.
+            adapter.navigation(controller, monitor, robot, {})
+        self.assertEqual([msg.data for msg in adapter.pub_nav.messages], [1, 1, 1, 2])
+        self.assertEqual([item['xy'] for item in adapter.goal_events], [[2., 3.]])
 
 
 if __name__ == '__main__':

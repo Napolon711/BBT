@@ -77,9 +77,9 @@ void check_team(int own_faction)
   ports.fold_set(true); CHECK(ports.fold_state()==kFoldUnknown);
   deliver(foldpub,folded); CHECK(ports.fold_state()==kFoldFolded);
   ports.offset+=1.1; CHECK(ports.fold_state()==kFoldUnknown);
-  CHECK(!ports.nav_set_goal(1,2)); // no Action server: never execute an unchecked topic goal
+  CHECK(ports.nav_set_goal(1,2)); // ordinary navigation needs only the UC topic executor
   bool counted=false;
-  for(const auto& link:ports.iface_report()) if(link.name=="nav_goal") {CHECK(link.count==0);counted=true;}
+  for(const auto& link:ports.iface_report()) if(link.name=="nav_goal") {CHECK(link.count==1);counted=true;}
   CHECK(counted);
   ports.base_spin(1.5);pump();ports.base_spin(0);pump();
   CHECK(modes.size()==2 && modes[0]==2 && modes[1]==1);
@@ -191,321 +191,73 @@ void check_nav2_route()
   handles[1]->succeed(std::make_shared<Action::Result>());
   pump();CHECK(ports.nav_state()==kGoalRunning && single_goals==0); // stale route result ignored
   CHECK(handles.back()->get_goal()->poses.size()==1); // folded exit-only recovery stays authorized
+  auto old_route = handles.back();
+  ports.nav_cancel();
+  CHECK(ports.nav_set_goal(20, 7));pump();
+  CHECK(single_goals==1 && ports.nav_state()==kGoalRunning);
+  old_route->succeed(std::make_shared<Action::Result>());pump();
+  CHECK(ports.nav_state()==kGoalRunning); // old tunnel result cannot finish a topic task
+  status->publish(stale);pump();
+  CHECK(ports.nav_state()==kGoalSuccess); // ordinary task uses the UC topic result
 }
-void check_single_goal_requires_identity_and_server()
+void check_ordinary_goal_topic_contract()
 {
-  auto node = std::make_shared<rclcpp::Node>("bbt_single_identity_test");
+  auto node = std::make_shared<rclcpp::Node>("bbt_topic_navigation_test",
+      rclcpp::NodeOptions().use_intra_process_comms(true));
   RosPortsConfig cfg;
   cfg.own_faction = 1;
-  cfg.nav_status_topic = "/single_identity/status";
+  cfg.nav_goal_topic = "/topic_navigation/goal";
+  cfg.nav_status_topic = "/topic_navigation/status";
+  cfg.nav_cancel_topic = "/topic_navigation/cancel";
   RosPorts ports(node.get(), cfg);
-  // A legacy status has no goal identity and cannot acknowledge a new request.
-  CHECK(!ports.nav_set_goal(3.25, 7.75));
-  auto status = node->create_publisher<std_msgs::msg::Int32>(cfg.nav_status_topic, 10);
-  for (int i = 0; i < 40; ++i)
-  {
-    std_msgs::msg::Int32 msg;
-    msg.data = kGoalSuccess;
-    status->publish(msg);
-    rclcpp::spin_some(node);
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-  }
-  CHECK(ports.nav_state() != kGoalSuccess);
-}
-
-void check_single_goal_checked_path_and_stale_results()
-{
-  using Compute = nav2_msgs::action::ComputePathToPose;
-  using ComputeServer = rclcpp_action::ServerGoalHandle<Compute>;
-  using Follow = nav2_msgs::action::FollowPath;
-  using FollowServer = rclcpp_action::ServerGoalHandle<Follow>;
-  auto node = std::make_shared<rclcpp::Node>("bbt_checked_navigation_test");
-  RosPortsConfig cfg;
-  cfg.own_faction = 1;
-  cfg.nav_compute_path_action = "/checked/compute";
-  cfg.nav_follow_path_action = "/checked/follow";
-  cfg.nav_status_topic = "/checked/status";
-  cfg.odom_topic = "/checked/odom";
-  TunnelDef tunnel;
-  tunnel.corners = {{1, 0}, {2, 0}, {2, 2}, {1, 2}};
-  cfg.nav_tunnels = {tunnel};
-  cfg.nav_regions = {"outer", "middle"};
-  cfg.nav_region_geometry = {
-      {"outer", {{-1, -2}, {.5, -2}, {.5, 5}, {-1, 5}}},
-      {"outer", {{2.5, -2}, {5, -2}, {5, 5}, {2.5, 5}}},
-      {"outer", {{-1, -2}, {5, -2}, {5, -.5}, {-1, -.5}}},
-      {"outer", {{-1, 2.5}, {5, 2.5}, {5, 5}, {-1, 5}}},
-      {"middle", {{.5, -.5}, {2.5, -.5}, {2.5, 2.5}, {.5, 2.5}}}};
-  std::vector<std::shared_ptr<ComputeServer>> plans;
-  std::vector<std::shared_ptr<FollowServer>> follows;
-  bool reject_follow = false;
-  auto compute_server = rclcpp_action::create_server<Compute>(node, cfg.nav_compute_path_action,
-      [](const rclcpp_action::GoalUUID&, std::shared_ptr<const Compute::Goal>) {
-        return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
-      }, [](std::shared_ptr<ComputeServer>) { return rclcpp_action::CancelResponse::ACCEPT; },
-      [&](std::shared_ptr<ComputeServer> handle) { plans.push_back(handle); });
-  auto follow_server = rclcpp_action::create_server<Follow>(node, cfg.nav_follow_path_action,
-      [&](const rclcpp_action::GoalUUID&, std::shared_ptr<const Follow::Goal>) {
-        return reject_follow ? rclcpp_action::GoalResponse::REJECT :
-            rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
-      }, [](std::shared_ptr<FollowServer>) { return rclcpp_action::CancelResponse::ACCEPT; },
-      [&](std::shared_ptr<FollowServer> handle) { follows.push_back(handle); });
-  RosPorts ports(node.get(), cfg);
-  auto odom_pub = node->create_publisher<nav_msgs::msg::Odometry>(cfg.odom_topic, 10);
+  std::vector<geometry_msgs::msg::PoseStamped> goals;
+  int cancels = 0;
+  auto goal_sub = node->create_subscription<geometry_msgs::msg::PoseStamped>(cfg.nav_goal_topic, 10,
+      [&](geometry_msgs::msg::PoseStamped::SharedPtr m) { goals.push_back(*m); });
+  auto cancel_sub = node->create_subscription<std_msgs::msg::Empty>(cfg.nav_cancel_topic, 10,
+      [&](std_msgs::msg::Empty::SharedPtr) { ++cancels; });
   auto status_pub = node->create_publisher<std_msgs::msg::Int32>(cfg.nav_status_topic, 10);
   const auto pump = [&]() {
-    for (int i = 0; i < 25; ++i)
-    {
+    for (int i = 0; i < 15; ++i) {
       rclcpp::spin_some(node);
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
   };
-  nav_msgs::msg::Odometry odom;
-  odom.pose.pose.position.x = 0;
-  odom.pose.pose.position.y = 1;
-  odom.pose.pose.orientation.w = 1;
-  for (int i = 0; i < 10 && !ports.base_pose().valid; ++i) { odom_pub->publish(odom); pump(); }
-  CHECK(ports.base_pose().valid);
-  const auto request = [&](double x, double y) {
-    bool sent = false;
-    for (int i = 0; i < 20 && !sent; ++i) { pump(); sent = ports.nav_set_goal(x, y); }
-    CHECK(sent);
+  const auto report = [&](int state) {
+    std_msgs::msg::Int32 message;
+    message.data = state;
+    status_pub->publish(message);
     pump();
-    CHECK(ports.nav_state() == kGoalRunning);
   };
-  const auto result = [](std::initializer_list<Vec2> positions) {
-    auto value = std::make_shared<Compute::Result>();
-    value->path.header.frame_id = "map";
-    for (const auto& p : positions)
-    {
-      geometry_msgs::msg::PoseStamped pose;
-      pose.header.frame_id = "map";
-      pose.pose.position.x = p.x;
-      pose.pose.position.y = p.y;
-      pose.pose.orientation.w = 1;
-      value->path.poses.push_back(pose);
-    }
-    return value;
-  };
-
-  request(3.25, 1);
-  CHECK(plans.size() == 1);
-  CHECK(plans.back()->get_goal()->goal.pose.position.x == 3.25);
-  plans.back()->succeed(result({{0, 1}, {3.25, 1}})); // direct path enters an unauthorized tunnel
+  // Unsolicited topic statuses do not create a task. No planner/controller
+  // Action server or odometry is required to submit an ordinary final goal.
+  report(kGoalSuccess);
+  CHECK(ports.nav_state() == kGoalIdle);
+  CHECK(ports.nav_set_goal(3.25, 7.75));
   pump();
-  CHECK(ports.nav_state() == kGoalFailure && follows.empty());
-
-  request(3.25, 1);
-  plans.back()->succeed(result({{0, 1}, {0, 6}, {3.25, 6}, {3.25, 1}})); // uncovered space
-  pump();
-  CHECK(ports.nav_state() == kGoalFailure && follows.empty());
-
-  request(3.25, 1);
-  // All sampled poses belong to "outer", but the sparse middle segment leaves
-  // it through another region without touching the tunnel rectangle.
-  plans.back()->succeed(result({{0, 1}, {0, 2.25}, {3.25, 2.25}, {3.25, 1}}));
-  pump();
-  CHECK(ports.nav_state() == kGoalFailure && follows.empty());
-
-  request(3.25, 1);
-  plans.back()->succeed(result({{0, 1}, {0, -1}, {3.25, -1}, {3.25, 1}}));
-  pump();
-  CHECK(follows.size() == 1 && ports.nav_state() == kGoalRunning);
-  CHECK(follows.back()->get_goal()->path.poses.size() == 4); // execute exactly the checked detour
-  std_msgs::msg::Int32 stale;
-  stale.data = kGoalSuccess;
-  status_pub->publish(stale);
-  pump();
-  CHECK(ports.nav_state() == kGoalRunning); // uncorrelated telemetry cannot acknowledge arrival
-  follows.back()->succeed(std::make_shared<Follow::Result>());
-  pump();
-  CHECK(ports.nav_state() == kGoalSuccess);
-
-  request(3.25, 1);
-  auto old_plan = plans.back();
-  request(3.25, 3);
-  CHECK(old_plan->is_canceling());
-  old_plan->succeed(result({{0, 1}, {3.25, 1}})); // result races the accepted cancellation
-  pump();
-  CHECK(ports.nav_state() == kGoalRunning && follows.size() == 1);
-  plans.back()->succeed(result({{0, 1}, {0, 3}, {3.25, 3}}));
-  pump();
-  CHECK(follows.size() == 2);
-  auto old_follow = follows.back();
-  ports.nav_cancel();
-  request(0, 4);
-  CHECK(old_follow->is_canceling());
-  old_follow->succeed(std::make_shared<Follow::Result>());
-  pump();
+  CHECK(goals.size() == 1 && ports.nav_state() == kGoalRunning);
+  CHECK(goals.back().header.frame_id == "map");
+  CHECK(goals.back().pose.position.x == 3.25 && goals.back().pose.position.y == 7.75);
+  CHECK(goals.back().pose.orientation.w == 1.0);
+  report(99);
   CHECK(ports.nav_state() == kGoalRunning);
-  plans.back()->succeed(result({{0, 1}, {0, 3.5}})); // wrong final coordinate
+  report(kGoalSuccess);
+  CHECK(ports.nav_state() == kGoalSuccess);
+  CHECK(!ports.nav_set_goal(std::numeric_limits<double>::quiet_NaN(), 1));
   pump();
-  CHECK(ports.nav_state() == kGoalFailure && follows.size() == 2);
-
-  request(0, 4);
-  reject_follow = true;
-  plans.back()->succeed(result({{0, 1}, {0, 4}}));
+  CHECK(goals.size() == 1 && ports.nav_state() == kGoalSuccess);
+  CHECK(ports.nav_set_goal(4.5, 6.5));
   pump();
-  CHECK(ports.nav_state() == kGoalFailure); // controller rejection is not arrival
-
-  // Legacy/demo configurations without a geometric partition keep their
-  // ordinary navigation interface; they still cannot invent an arbitrary region.
-  auto demo_cfg = cfg;
-  demo_cfg.nav_region_geometry.clear();
-  demo_cfg.nav_tunnels.clear();
-  RosPorts demo_ports(node.get(), demo_cfg);
-  odom_pub->publish(odom);
+  CHECK(goals.size() == 2 && ports.nav_state() == kGoalRunning);
+  report(kGoalFailure);
+  CHECK(ports.nav_state() == kGoalFailure);
+  ports.nav_cancel();
   pump();
-  bool sent = false;
-  for (int i = 0; i < 20 && !sent; ++i) { pump(); sent = demo_ports.nav_set_goal(3.25, 1); }
-  CHECK(sent);
-  pump();
-  reject_follow = false;
-  plans.back()->succeed(result({{0, 1}, {3.25, 1}}));
-  pump();
-  CHECK(demo_ports.nav_state() == kGoalRunning && follows.size() == 3);
-  follows.back()->succeed(std::make_shared<Follow::Result>());
-  pump();
-  CHECK(demo_ports.nav_state() == kGoalSuccess);
+  CHECK(cancels == 1 && ports.nav_state() == kGoalIdle);
+  report(kGoalSuccess);
+  CHECK(ports.nav_state() == kGoalIdle);
 }
 
-void check_successful_tunnel_exit_clearance()
-{
-  using Compute = nav2_msgs::action::ComputePathToPose;
-  using ComputeServer = rclcpp_action::ServerGoalHandle<Compute>;
-  using Follow = nav2_msgs::action::FollowPath;
-  using FollowServer = rclcpp_action::ServerGoalHandle<Follow>;
-  using Through = nav2_msgs::action::NavigateThroughPoses;
-  using ThroughServer = rclcpp_action::ServerGoalHandle<Through>;
-  auto node = std::make_shared<rclcpp::Node>("bbt_exit_clearance_test");
-  RosPortsConfig cfg;
-  cfg.own_faction = 1;
-  cfg.nav_compute_path_action = "/exit_clearance/compute";
-  cfg.nav_follow_path_action = "/exit_clearance/follow";
-  cfg.nav_through_poses_action = "/exit_clearance/through";
-  cfg.odom_topic = "/exit_clearance/odom";
-  cfg.referee_topic = "/exit_clearance/referee";
-  TunnelDef tunnel;
-  tunnel.align[0] = {9.32, 3.5}; tunnel.align[1] = {9.32, 1};
-  tunnel.center = {9.32, 2.15}; tunnel.has_center = true;
-  tunnel.corners = {{9.82, 3.5}, {8.82, 3.5}, {8.82, 1}, {9.82, 1}};
-  auto other = tunnel;
-  other.corners = {{10.5, .8}, {10.7, .8}, {10.7, .95}, {10.5, .95}};
-  other.align[0] = {10.4, .875}; other.align[1] = {10.8, .875};
-  other.center = {10.6, .875};
-  cfg.nav_tunnels = {tunnel, other};
-  cfg.nav_regions = {"mid"};
-  cfg.nav_region_geometry = {{"mid", {{0, 0}, {28, 0}, {28, 15}, {0, 15}}}};
-  std::vector<std::shared_ptr<ComputeServer>> plans;
-  std::vector<std::shared_ptr<FollowServer>> follows;
-  std::vector<std::shared_ptr<ThroughServer>> crossings;
-  auto compute = rclcpp_action::create_server<Compute>(node, cfg.nav_compute_path_action,
-      [](const rclcpp_action::GoalUUID&, std::shared_ptr<const Compute::Goal>) {
-        return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
-      }, [](std::shared_ptr<ComputeServer>) { return rclcpp_action::CancelResponse::ACCEPT; },
-      [&](std::shared_ptr<ComputeServer> handle) { plans.push_back(handle); });
-  auto follow = rclcpp_action::create_server<Follow>(node, cfg.nav_follow_path_action,
-      [](const rclcpp_action::GoalUUID&, std::shared_ptr<const Follow::Goal>) {
-        return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
-      }, [](std::shared_ptr<FollowServer>) { return rclcpp_action::CancelResponse::ACCEPT; },
-      [&](std::shared_ptr<FollowServer> handle) { follows.push_back(handle); });
-  auto through = rclcpp_action::create_server<Through>(node, cfg.nav_through_poses_action,
-      [](const rclcpp_action::GoalUUID&, std::shared_ptr<const Through::Goal>) {
-        return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
-      }, [](std::shared_ptr<ThroughServer>) { return rclcpp_action::CancelResponse::ACCEPT; },
-      [&](std::shared_ptr<ThroughServer> handle) { crossings.push_back(handle); });
-  RosPorts ports(node.get(), cfg);
-  auto odom_pub = node->create_publisher<nav_msgs::msg::Odometry>(cfg.odom_topic, 10);
-  auto ref_pub = node->create_publisher<std_msgs::msg::Float64MultiArray>(cfg.referee_topic, 10);
-  const auto pump = [&]() {
-    for (int i = 0; i < 25; ++i)
-    {
-      rclcpp::spin_some(node);
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
-  };
-  nav_msgs::msg::Odometry odom;
-  odom.pose.pose.position.x = 9.320000293611336;
-  odom.pose.pose.position.y = 1.0202299563309136; // real physical case's successful exit residual
-  odom.pose.pose.orientation.w = 1;
-  for (int i = 0; i < 10 && !ports.base_pose().valid; ++i) { odom_pub->publish(odom); pump(); }
-  CHECK(ports.base_pose().valid);
-  std_msgs::msg::Float64MultiArray playing; playing.data = {4, 400, 400, 100, 0, -1, -1, 0, 0};
-  ref_pub->publish(playing); pump();
-  const auto request = [&]() {
-    bool sent = false;
-    for (int i = 0; i < 20 && !sent; ++i) { pump(); sent = ports.nav_set_goal(11.37, .66); }
-    CHECK(sent); pump();
-  };
-  const auto complete_plan = [&](std::initializer_list<Vec2> positions) {
-    auto result = std::make_shared<Compute::Result>();
-    result->path.header.frame_id = "map";
-    for (const auto& p : positions)
-    {
-      geometry_msgs::msg::PoseStamped pose;
-      pose.header.frame_id = "map";
-      pose.pose.position.x = p.x; pose.pose.position.y = p.y;
-      pose.pose.orientation.w = 1;
-      result->path.poses.push_back(pose);
-    }
-    plans.back()->succeed(result); pump();
-  };
-  const auto authorize_exit = [&]() {
-    CHECK(ports.nav_through_poses({{9.32, 2.15}, {9.32, 1}})); pump();
-    crossings.back()->succeed(std::make_shared<Through::Result>()); pump();
-    CHECK(ports.nav_state() == kGoalSuccess);
-    ports.nav_cancel(); // normal successful-exit stop must retain the physical clearance evidence
-  };
-  request();
-  complete_plan({{9.320000293611336, 1.0202299563309136}, {9.32, .45}, {11.37, .66}});
-  CHECK(ports.nav_state() == kGoalFailure && follows.empty()); // no crossing evidence
-  authorize_exit();
-  request();
-  complete_plan({{9.320000293611336, 1.0202299563309136}, {9.32, .45}, {11.37, .66}});
-  CHECK(ports.nav_state() == kGoalRunning && follows.size() == 1);
-  ports.nav_cancel();
-  request();
-  complete_plan({{9.320000293611336, 1.0202299563309136}, {9.32, 1.1}, {9.32, .45}, {11.37, .66}});
-  CHECK(ports.nav_state() == kGoalFailure && follows.size() == 1); // backtracking inside the mouth
-  request();
-  complete_plan({{9.320000293611336, 1.0202299563309136}, {9.32, .45}, {9.32, 1.01}, {11.37, .66}});
-  CHECK(ports.nav_state() == kGoalFailure && follows.size() == 1); // no re-entry after clearance
-  request();
-  complete_plan({{9.320000293611336, 1.0202299563309136}, {9.32, .45}, {10.6, .875}, {11.37, .66}});
-  CHECK(ports.nav_state() == kGoalFailure && follows.size() == 1); // another tunnel stays forbidden
-  CHECK(ports.nav_through_poses({{9.32, 1.02}})); pump();
-  crossings.back()->succeed(std::make_shared<Through::Result>()); pump();
-  ports.nav_cancel();
-  request();
-  complete_plan({{9.320000293611336, 1.0202299563309136}, {9.32, .45}, {11.37, .66}});
-  CHECK(ports.nav_state() == kGoalFailure && follows.size() == 1); // success at an unconfigured point grants nothing
-  authorize_exit();
-  odom.pose.pose.position.y = 2.2; odom_pub->publish(odom); pump();
-  request();
-  complete_plan({{9.320000293611336, 2.2}, {9.32, .45}, {11.37, .66}});
-  CHECK(ports.nav_state() == kGoalFailure && follows.size() == 1); // not yet past the real center
-  odom.pose.pose.position.y = 1.0202299563309136; odom_pub->publish(odom); pump();
-  authorize_exit();
-  CHECK(ports.nav_through_poses({{9.32, 2.15}, {9.32, 1}})); pump();
-  request(); // a new crossing revokes the old exit evidence before its success
-  complete_plan({{9.320000293611336, 1.0202299563309136}, {9.32, .45}, {11.37, .66}});
-  CHECK(ports.nav_state() == kGoalFailure && follows.size() == 1);
-  authorize_exit();
-  odom.pose.pose.position.y = .9; odom_pub->publish(odom); pump();
-  odom.pose.pose.position.y = 1.0202299563309136; odom_pub->publish(odom); pump();
-  request(); // leaving the body consumes physical clearance; moving back cannot reuse it
-  complete_plan({{9.320000293611336, 1.0202299563309136}, {9.32, .45}, {11.37, .66}});
-  CHECK(ports.nav_state() == kGoalFailure && follows.size() == 1);
-  authorize_exit();
-  CHECK(ports.nav_through_poses({{9.32, 2.15}, {9.32, 1}})); pump();
-  std_msgs::msg::Float64MultiArray ended; ended.data = {5, 400, 400, 100, 0, -1, -1, 0, 0};
-  ref_pub->publish(ended); pump();
-  crossings.back()->succeed(std::make_shared<Through::Result>()); pump();
-  ports.nav_cancel(); // even an accepted request's late success cannot restore match-end authority
-  request();
-  complete_plan({{9.320000293611336, 1.0202299563309136}, {9.32, .45}, {11.37, .66}});
-  CHECK(ports.nav_state() == kGoalFailure && follows.size() == 1); // match end revokes clearance
-}
 int main(int argc,char**argv)
 {
   rclcpp::init(argc,argv);
@@ -522,9 +274,7 @@ int main(int argc,char**argv)
   }
   check_team(1);
   check_team(2);
-  check_single_goal_requires_identity_and_server();
-  check_single_goal_checked_path_and_stale_results();
-  check_successful_tunnel_exit_clearance();
+  check_ordinary_goal_topic_contract();
   check_nav2_route();
   rclcpp::shutdown();
   std::puts("PASS: manual red/blue, missing/wrong/stale identity, summary layouts, freshness, modes, purchases and intra-process communication");

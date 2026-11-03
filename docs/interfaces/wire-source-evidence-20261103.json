@@ -1,0 +1,74 @@
+{
+  "bbt_baseline": "10e09107fc64640c8df1eb3409cf446bd230477a",
+  "scope": "Source snapshot only; no firmware binary, hardware connection, or production action server verified",
+  "files": {
+    "/home/chengdong/BBT/src/ros2_libxr/include/ros2_libxr/referee_2027.hpp": {
+      "sha256": "5b4f7f48dbfd5d729edd33fc9c3d615b5d42f9c7e9a4622986cca72ffc46f717",
+      "size_bytes": 3790
+    },
+    "/home/chengdong/BBT/src/ros2_libxr/include/ros2_libxr/shared_topic.hpp": {
+      "sha256": "3643c187e7fb5d88068a12a5c3f3848195b646b16228e6e29d89604768b06d89",
+      "size_bytes": 2660
+    },
+    "/home/chengdong/BBT/src/ros2_libxr/src/referee_2027.cpp": {
+      "sha256": "563f6750339b3bb653b3908fe72a91053b3fc40f50b527a0c1c06f09400d9da2",
+      "size_bytes": 3177
+    },
+    "/home/chengdong/BBT/src/ros2_libxr/src/shared_topic.cpp": {
+      "sha256": "bdd7f3c922992592101734bc63c17d482cc3a465848dc96eff169e736ea4be90",
+      "size_bytes": 5266
+    },
+    "/home/chengdong/BBT/src/ros2_libxr/src/bridge_node.cpp": {
+      "sha256": "8de9a1a2716751285b93c213b76e8cee07e3cf22d26b08f5ba02c27fc64f987f",
+      "size_bytes": 51735
+    },
+    "/home/chengdong/27BT-UC/src/ros2_libxr/include/ros2_libxr/referee_2027.hpp": {
+      "sha256": "5b4f7f48dbfd5d729edd33fc9c3d615b5d42f9c7e9a4622986cca72ffc46f717",
+      "size_bytes": 3790
+    },
+    "/home/chengdong/27BT-UC/src/ros2_libxr/include/ros2_libxr/shared_topic.hpp": {
+      "sha256": "3643c187e7fb5d88068a12a5c3f3848195b646b16228e6e29d89604768b06d89",
+      "size_bytes": 2660
+    },
+    "/home/chengdong/27BT-UC/src/ros2_libxr/src/referee_2027.cpp": {
+      "sha256": "563f6750339b3bb653b3908fe72a91053b3fc40f50b527a0c1c06f09400d9da2",
+      "size_bytes": 3177
+    },
+    "/home/chengdong/27BT-UC/src/ros2_libxr/src/shared_topic.cpp": {
+      "sha256": "bdd7f3c922992592101734bc63c17d482cc3a465848dc96eff169e736ea4be90",
+      "size_bytes": 5266
+    },
+    "/home/chengdong/27BT-UC/.cache/audit_20261031/daohangxiaoche/User/xrobot_main.hpp": {
+      "sha256": "a382f36e4ce34895c8307bd2d1d50594a53634162ee89cd17d1dffb2cbbb18c8",
+      "size_bytes": 5887
+    },
+    "/home/chengdong/27BT-UC/.cache/audit_20261031/daohangxiaoche/Modules/HostData/HostData.hpp": {
+      "sha256": "af73915496af76091a128dbd3e72fc12ca259a17234206dc585ccc11f5edd16a",
+      "size_bytes": 9918
+    },
+    "/home/chengdong/27BT-UC/.cache/audit_20261031/daohangxiaoche/Modules/Chassis/Omni.hpp": {
+      "sha256": "9a7479ba4806e41b452743df4c54042002620b38a193373af930533ba6599929",
+      "size_bytes": 40924
+    },
+    "/home/chengdong/27BT-UC/.cache/audit_20261031/daohangxiaoche/Modules/Chassis/Helm.hpp": {
+      "sha256": "4f1932677049ec34325c32f04e1f62fe73054541edbaad169ccd7e21f799713a",
+      "size_bytes": 21577
+    },
+    "/opt/ros/jazzy/share/nav2_msgs/action/ComputePathToPose.action": {
+      "sha256": "2a1bdad4de1f0308c51f154d39a7c6aad1919bf9cfa848fe621557c7f8a33060",
+      "size_bytes": 669
+    },
+    "/opt/ros/jazzy/share/nav2_msgs/action/FollowPath.action": {
+      "sha256": "8c29c7286c5ee0616d19d15d1eec1aefb810a292e7c956499349b294232078ad",
+      "size_bytes": 579
+    },
+    "/opt/ros/jazzy/share/nav2_msgs/action/NavigateThroughPoses.action": {
+      "sha256": "a39ff53f44082609a8a7864131a9a16086e3af6dd080b6f769a09d8b529adf01",
+      "size_bytes": 489
+    },
+    "/home/chengdong/27BT-UC/.cache/audit_20261031/daohangxiaoche/Modules/SimReferee/SimReferee.hpp": {
+      "sha256": "1687c72b36e30025cdcc3d604582298d3f6a6dd9ec07ac9acefd6242fa20811c",
+      "size_bytes": 9849
+    }
+  }
+}

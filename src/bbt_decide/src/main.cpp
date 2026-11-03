@@ -108,13 +108,6 @@ public:
     rc.nav_goal_topic = tm.nav_goal;
     rc.nav_through_poses_action = declare_parameter<std::string>(
         "nav_through_poses_action", "/navigate_through_poses");
-    rc.nav_compute_path_action = declare_parameter<std::string>(
-        "nav_compute_path_action", "/compute_path_to_pose");
-    rc.nav_follow_path_action = declare_parameter<std::string>(
-        "nav_follow_path_action", "/follow_path");
-    rc.nav_tunnels = cfg_->tunnels;
-    rc.nav_regions = cfg_->regions;
-    rc.nav_region_geometry = cfg_->region_geometry;
     rc.nav_status_topic = tm.nav_status;
     rc.nav_cancel_topic = tm.nav_cancel;
     rc.odom_topic = tm.odom;

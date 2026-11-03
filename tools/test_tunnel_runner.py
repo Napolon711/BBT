@@ -13,7 +13,52 @@ from run_tunnel_suite import ROOT, PreparationNavigator, case_config
 
 
 class TunnelRunnerTests(unittest.TestCase):
-    def test_ordinary_retry_requires_explicit_new_plan_after_physical_stop(self):
+    def node(self):
+        from builtin_interfaces.msg import Time
+
+        class Publisher:
+            def __init__(self):
+                self.messages = []
+
+            def publish(self, message):
+                self.messages.append(message)
+
+        publishers, subscriptions = {}, {}
+        def create_publisher(message_type, topic, depth):
+            publishers[topic] = Publisher()
+            return publishers[topic]
+        def create_subscription(message_type, topic, callback, depth):
+            subscriptions[topic] = callback
+            return SimpleNamespace()
+        return SimpleNamespace(get_clock=lambda: SimpleNamespace(
+            now=lambda: SimpleNamespace(to_msg=Time)),
+            create_publisher=create_publisher, create_subscription=create_subscription,
+            publishers=publishers, subscriptions=subscriptions)
+
+    def test_ordinary_goal_and_completion_use_topic_boundary(self):
+        from std_msgs.msg import Int32
+        node = self.node()
+        with patch('rclpy.action.ActionClient') as action_client:
+            navigator = PreparationNavigator(node)
+        self.assertEqual(action_client.call_count, 1)
+        self.assertEqual(action_client.call_args.args[-1], '/navigate_through_poses')
+        navigator.start(dict(side='staging', goal=[2.,5.]))
+        messages = node.publishers['/goal_pose'].messages
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].header.frame_id, 'map')
+        self.assertEqual((messages[0].pose.position.x,messages[0].pose.position.y), (2.,5.))
+        status = node.subscriptions['/nav_status']
+        status(Int32(data=2))  # A previous leg's result must not finish this goal.
+        self.assertEqual(navigator.status(), (False,None))
+        status(Int32(data=1))
+        status(Int32(data=2))
+        self.assertEqual(navigator.status(), (True,None))
+        navigator.cancel()
+        self.assertEqual(len(node.publishers['/nav_cancel'].messages), 1)
+        status(Int32(data=3))
+        self.assertEqual(navigator.status(), (False,None))
+
+    def test_ordinary_retry_republishes_only_after_physical_stop(self):
         class Client:
             def __init__(self, *_):
                 self.goals = []
@@ -22,19 +67,21 @@ class TunnelRunnerTests(unittest.TestCase):
                 self.goals.append(goal)
                 return Future()
 
-        from builtin_interfaces.msg import Time
-        node = SimpleNamespace(get_clock=lambda: SimpleNamespace(
-            now=lambda: SimpleNamespace(to_msg=Time)))
+        from std_msgs.msg import Int32
+        node = self.node()
         with patch('rclpy.action.ActionClient', Client):
             navigator = PreparationNavigator(node)
         navigator.start(dict(side='staging', goal=[2.,5.]))
-        navigator.error = 'physical controller blocked'
+        status = node.subscriptions['/nav_status']
+        status(Int32(data=1))
+        status(Int32(data=3))
         self.assertFalse(navigator.retry_after_stop(.3, 10.))
-        self.assertEqual(len(navigator.compute.goals), 1)
+        self.assertEqual(len(node.publishers['/goal_pose'].messages), 1)
+        self.assertEqual(len(node.publishers['/nav_cancel'].messages), 1)
         for index in range(10):
             self.assertFalse(navigator.retry_after_stop(0., 10.+index*.05))
         self.assertTrue(navigator.retry_after_stop(0., 10.5))
-        self.assertEqual(len(navigator.compute.goals), 2)
+        self.assertEqual(len(node.publishers['/goal_pose'].messages), 2)
         self.assertEqual(navigator.status(), (False,None))
         navigator.error = 'second blocked'
         navigator.retry_after_stop(0., 11.)
@@ -42,13 +89,13 @@ class TunnelRunnerTests(unittest.TestCase):
         navigator.error = 'third blocked'
         with self.assertRaisesRegex(RuntimeError, 'retry limit'):
             navigator.retry_after_stop(0., 12.)
-        self.assertEqual(len(navigator.compute.goals), 3)
+        self.assertEqual(len(node.publishers['/goal_pose'].messages), 3)
 
         navigator.start(dict(side='exit', center=[2.,4.2], goal=[2.,5.]))
         navigator.error = 'tunnel failure'
         with self.assertRaisesRegex(RuntimeError, 'tunnel failure'):
             navigator.retry_after_stop(0., 13.)
-        self.assertEqual(len(navigator.compute.goals), 3)
+        self.assertEqual(len(node.publishers['/goal_pose'].messages), 3)
 
     def test_cancel_cancels_goal_accepted_after_request_was_canceled(self):
         class DelayedClient:
@@ -68,9 +115,7 @@ class TunnelRunnerTests(unittest.TestCase):
             def get_result_async(self):
                 raise AssertionError('canceled stale goal must not install a result callback')
 
-        from builtin_interfaces.msg import Time
-        node = SimpleNamespace(get_clock=lambda: SimpleNamespace(
-            now=lambda: SimpleNamespace(to_msg=Time)))
+        node = self.node()
         with patch('rclpy.action.ActionClient', DelayedClient):
             navigator = PreparationNavigator(node)
         navigator.start(dict(side='exit', center=[2.,4.2], goal=[2.,5.]))

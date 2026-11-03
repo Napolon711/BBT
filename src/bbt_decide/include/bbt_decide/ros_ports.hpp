@@ -10,8 +10,6 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-#include <nav2_msgs/action/compute_path_to_pose.hpp>
-#include <nav2_msgs/action/follow_path.hpp>
 #include <nav2_msgs/action/navigate_through_poses.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -53,13 +51,7 @@ struct RosPortsConfig
   std::string sentry_info_topic = "/referee/sentry_info";
   std::string purchase_topic = "/referee/sentry_command";
   std::string nav_goal_topic = "/goal_pose";
-  std::string nav_compute_path_action = "/compute_path_to_pose";
-  std::string nav_follow_path_action = "/follow_path";
   std::string nav_through_poses_action = "/navigate_through_poses";
-  // 已部署到 map 系的洞体；普通路径不得穿越，只有折叠流程的多点任务获授权。
-  std::vector<TunnelDef> nav_tunnels;
-  std::vector<std::string> nav_regions;
-  std::vector<RegionGeometry> nav_region_geometry;
   std::string nav_status_topic = "/nav_status";
   std::string nav_cancel_topic = "/nav_cancel";
   std::string odom_topic = "/odom";
@@ -95,7 +87,7 @@ struct LinkStat
 
 // Ports 的 ROS 2 实现。线程模型：订阅回调在 ROS 执行器线程加锁写缓存，
 // 决策线程通过 getter 加锁读快照——所有 getter 不阻塞、不等话题。
-// 下发类接口异步返回；导航看绑定请求身份的 Action 回执，机构看 fold_state。
+// 下发类接口异步返回；普通导航看 nav_status，过洞看 Action 回执，机构看 fold_state。
 class RosPorts : public Ports
 {
 public:
@@ -106,13 +98,13 @@ public:
   RosPorts(rclcpp::Node* node, const RosPortsConfig& cfg);
 
   // ---- 哨兵导航 ----
-  // ComputePathToPose 规划，拒绝穿洞路径，再用 FollowPath 执行固定路径。
-  // /goal_pose 只作观测，不允许另接执行器；成功只接受本次 Action 的结果。
+  // 发布普通最终目标到 UC /goal_pose；规划与避障由外部导航执行。
+  // 返回 true 仅表示已发布，不表示导航已接受；结果读取 /nav_status。
   bool nav_set_goal(double x, double y) override;
   bool nav_through_poses(const std::vector<Vec2>& poses) override;
-  // 按 Goal UUID 取消本适配器拥有的 Action，并发布兼容取消观测；本地立刻 idle。
+  // 普通导航发 /nav_cancel；过洞按 Goal UUID 取消；本地立刻 idle。
   void nav_cancel() override;
-  // 读本次导航 Action 的状态，忽略不带请求身份的 /nav_status。
+  // 普通导航读 /nav_status，过洞只读本次 Action 的状态。
   GoalState nav_state() override;
   // 读最近一帧 /odom 的位姿快照；valid = 收到过至少一帧。
   BasePose base_pose() override;
@@ -174,25 +166,13 @@ private:
   std::vector<LinkStat>::iterator find_link_locked(const std::string& name);
   double input_age_ms_locked(const std::string& name);
   bool request_purchase(int kind, int amount);
-  uint64_t replace_navigation(GoalState state);
-  bool ordinary_path_allowed(const nav_msgs::msg::Path& path, const Vec2& target);
-  void follow_checked_path(const nav_msgs::msg::Path& path, uint64_t generation);
-  using ComputePath = nav2_msgs::action::ComputePathToPose;
-  using ComputeHandle = rclcpp_action::ClientGoalHandle<ComputePath>;
-  using FollowPath = nav2_msgs::action::FollowPath;
-  using FollowHandle = rclcpp_action::ClientGoalHandle<FollowPath>;
+  uint64_t replace_navigation(GoalState state, bool topic_goal = false);
   using ThroughPoses = nav2_msgs::action::NavigateThroughPoses;
   using ThroughHandle = rclcpp_action::ClientGoalHandle<ThroughPoses>;
-  rclcpp_action::Client<ComputePath>::SharedPtr compute_client_;
-  rclcpp_action::Client<FollowPath>::SharedPtr follow_client_;
   rclcpp_action::Client<ThroughPoses>::SharedPtr through_client_;
-  ComputeHandle::SharedPtr compute_handle_;
-  FollowHandle::SharedPtr follow_handle_;
   ThroughHandle::SharedPtr through_handle_;
   uint64_t nav_generation_ = 0;
-  // Evidence from a successful authorized request, never a business phase.
-  int completed_exit_tunnel_ = -1;
-  int completed_exit_side_ = -1;
+  bool topic_goal_active_ = false;  // 无请求身份的状态只用于当前普通话题目标。
 
   rclcpp::Node* node_;  // 非拥有节点指针
   RosPortsConfig cfg_;

@@ -140,23 +140,29 @@ def preparation_route(tunnels,destination,team,reference='red'):
 
 
 class PreparationNavigator:
-    """Use the same public Nav2 actions as production during physical staging.
+    """Use production navigation boundaries during physical staging.
 
-    Ordinary legs execute the exact path returned by ComputePathToPose. A tunnel
-    leg is a single NavigateThroughPoses action whose centre is pass-through.
-    Completion always comes from an action result and physical observations.
+    Ordinary legs publish only their final goal and wait for navigation status.
+    A tunnel leg uses NavigateThroughPoses with a pass-through centre. The Arena
+    servers are simulation substitutes; they do not establish real Nav2 wiring.
     """
-    def __init__(self,node,record=None):
-        from nav2_msgs.action import ComputePathToPose,FollowPath,NavigateThroughPoses
+    def __init__(self,node,record=None,topics=None):
+        from geometry_msgs.msg import PoseStamped
+        from std_msgs.msg import Empty,Int32
+        from nav2_msgs.action import NavigateThroughPoses
         from rclpy.action import ActionClient
         self.node=node
-        self.compute_type,self.follow_type,self.route_type=ComputePathToPose,FollowPath,NavigateThroughPoses
-        self.compute=ActionClient(node,ComputePathToPose,'/compute_path_to_pose')
-        self.follow=ActionClient(node,FollowPath,'/follow_path')
+        self.route_type=NavigateThroughPoses
         self.route=ActionClient(node,NavigateThroughPoses,'/navigate_through_poses')
         self.lock=threading.Lock();self.token=0;self.complete=False;self.error=None;self.handle=None
         self.record=record or (lambda *args:None)
         self.waypoint=None;self.retry_count=0;self.retry_waiting=False;self.stopped_since=None
+        self.ordinary_active=False;self.ordinary_running=False
+        self.topics=dict(nav_goal='/goal_pose',nav_status='/nav_status',nav_cancel='/nav_cancel')
+        self.topics.update({k:v for k,v in (topics or {}).items() if k in self.topics and v})
+        self.goal_pub=node.create_publisher(PoseStamped,self.topics['nav_goal'],10)
+        self.cancel_pub=node.create_publisher(Empty,self.topics['nav_cancel'],10)
+        self.status_sub=node.create_subscription(Int32,self.topics['nav_status'],self.on_status,10)
 
     def pose(self,xy):
         from geometry_msgs.msg import PoseStamped
@@ -165,10 +171,30 @@ class PreparationNavigator:
         return pose
 
     def ready(self):
-        return all(client.wait_for_server(timeout_sec=10.) for client in (self.compute,self.follow,self.route))
+        deadline=time.monotonic()+10.
+        if not self.route.wait_for_server(timeout_sec=10.):return False
+        while time.monotonic()<deadline:
+            if (self.goal_pub.get_subscription_count()>0 and self.cancel_pub.get_subscription_count()>0
+                    and self.status_sub.get_publisher_count()>0):return True
+            time.sleep(.05)
+        return False
 
     def status(self):
         with self.lock:return self.complete,self.error
+
+    def on_status(self,msg):
+        with self.lock:
+            if not self.ordinary_active:return
+            if msg.data==1:self.ordinary_running=True
+            # The legacy status topic has no goal ID. Wait for the new goal's
+            # running report before consuming a terminal result. This filters
+            # queued terminal-only feedback, but cannot identify all stale
+            # statuses after a running report; the interface has no goal ID.
+            elif self.ordinary_running and msg.data==2:
+                self.complete=True;self.ordinary_active=False
+            elif self.ordinary_running and msg.data==3:
+                self.error='preparation ordinary navigation failed: /nav_status=3'
+                self.ordinary_active=False
 
     def _callback(self,token,callback):
         def guarded(future):
@@ -205,6 +231,7 @@ class PreparationNavigator:
             self.waypoint=copy.deepcopy(waypoint)
             if not retry:self.retry_count=0
             self.retry_waiting=False;self.stopped_since=None
+            self.ordinary_active=waypoint['side']!='exit';self.ordinary_running=False
         self.record('preparation_request',dict(token=token,retry=self.retry_count,waypoint=waypoint))
         def finished(future):
             from action_msgs.msg import GoalStatus
@@ -218,26 +245,22 @@ class PreparationNavigator:
             goal=self.route_type.Goal();goal.poses=[self.pose(point) for point in points]
             self._send(self.route,goal,token,finished)
         else:
-            def planned(future):
-                from action_msgs.msg import GoalStatus
-                result=future.result()
-                if result.status!=GoalStatus.STATUS_SUCCEEDED or not result.result.path.poses:
-                    raise RuntimeError('preparation ComputePathToPose failed to return a path')
-                goal=self.follow_type.Goal();goal.path=result.result.path
-                self._send(self.follow,goal,token,finished)
-            goal=self.compute_type.Goal();goal.goal=self.pose(waypoint['goal']);goal.use_start=False
-            self._send(self.compute,goal,token,planned)
+            self.goal_pub.publish(self.pose(waypoint['goal']))
 
     def cancel(self):
+        from std_msgs.msg import Empty
         with self.lock:
             self.token+=1;handle=self.handle;self.handle=None
+            ordinary=self.waypoint is not None and self.waypoint['side']!='exit'
+            self.ordinary_active=False;self.complete=False
         if handle is not None:handle.cancel_goal_async()
+        if ordinary:self.cancel_pub.publish(Empty())
 
     def retry_after_stop(self,speed,time_s):
-        """Retry an ordinary failed action only after an explicit physical stop.
+        """Retry an ordinary failed goal only after an explicit physical stop.
 
-        The old FollowPath never replans. A retry is a new ComputePathToPose
-        request followed by a new frozen FollowPath; tunnel actions fail closed.
+        A retry republishes the final target through the ordinary topic boundary;
+        navigation owns its new obstacle route. Tunnel actions fail closed.
         """
         with self.lock:
             error=self.error;waypoint=copy.deepcopy(self.waypoint)
@@ -257,7 +280,7 @@ class PreparationNavigator:
         if self.stopped_since is None:self.stopped_since=time_s
         if time_s-self.stopped_since<.5-1e-9:return False
         self.record('preparation_retry',dict(time_s=time_s,waypoint=waypoint,
-            retry=self.retry_count,measured_speed_mps=speed,action='ComputePathToPose_then_FollowPath'))
+            retry=self.retry_count,measured_speed_mps=speed,action='publish_final_goal_pose'))
         self.start(waypoint,retry=True)
         return True
 
@@ -292,7 +315,7 @@ def run_one(args,index,direction):
     fold_pub=node.create_publisher(UInt8,bridge.t['fold_cmd'],10)
     stop_pub=node.create_publisher(Twist,bridge.t['cmd_vel'],10)
     mode_pub=node.create_publisher(Int32,bridge.t['chassis_mode'],10)
-    preparation=PreparationNavigator(node,record)
+    preparation=PreparationNavigator(node,record,bridge.t)
     executor=rclpy.executors.SingleThreadedExecutor();executor.add_node(node)
     spin=threading.Thread(target=executor.spin,daemon=True);spin.start()
     match=Match(seed=args.seed,duration=420,map_name='rmuc2027',lineups={team:[dict(slot=k,model=v) for k,v in ((1,2711),(3,2731),(4,2732),(6,2761),(7,2773))] for team in ('red','blue')})
@@ -312,7 +335,7 @@ def run_one(args,index,direction):
     started=time.monotonic();next_announce=0.;last_command=-1.;phase='prepare_fold';held={};settled=0;complete_at=None;error=None;prep_goal=0
     last_xy=None;last_radius=0.;last_progress=-10.
     try:
-        if not preparation.ready():raise RuntimeError('preparation Nav2 action servers are unavailable')
+        if not preparation.ready():raise RuntimeError('preparation goal/status/cancel topics or tunnel action server unavailable')
         started=time.monotonic()
         while frame['time']<min(410,args.prep_timeout+args.test_timeout+5):
             bridge.time_s=frame['time'];sentry=next(r for r in frame['robots'] if r['id']==args.team+'-7')

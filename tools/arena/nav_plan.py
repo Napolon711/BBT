@@ -1,4 +1,4 @@
-"""Recover the SDK's complete remaining route for the production path gate.
+"""Compute obstacle routes inside the Arena navigation substitute.
 
 The SDK exposes its graph but normally returns only the first movement vector.
 Here Dijkstra predecessors retain every graph vertex. Each returned segment also
@@ -14,20 +14,6 @@ except ImportError:  # Direct execution alongside the Arena bridge.
 
 
 _COST_CACHE={}
-
-
-def route_via_exit(sdk,robot,goal,routing_arena,exit_clear,clearance=.47):
-    """Plan through an axial exit waypoint before turning toward the same goal.
-
-    ``virtual_start`` is solely the second graph query's start vertex. No engine
-    object, localization message, ROS destination, or robot state is mutated.
-    """
-    first=remaining_route(sdk,robot,exit_clear,routing_arena,clearance)
-    if len(first)<2:return []
-    virtual_start=dict(robot,x=float(exit_clear[0]),y=float(exit_clear[1]))
-    second=remaining_route(sdk,virtual_start,goal,routing_arena,clearance)
-    if len(second)<2:return []
-    return first+second[1:]
 
 
 def remaining_route(sdk,robot,goal,routing_arena,clearance=.47):
