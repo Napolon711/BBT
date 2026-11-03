@@ -10,7 +10,8 @@ IDs are preserved. Each replay contains preparation and actual acceptance motion
 import argparse
 import copy
 import difflib
-import hashlib
+import importlib.util
+import re
 import json
 import math
 import os
@@ -25,20 +26,55 @@ from concurrent.futures import ThreadPoolExecutor
 import yaml
 from check_tunnel_suite import roof_for,validate
 from arena.navigation_constraints import bumps_clearance
+from build_acceptance_receipt import validate_receipt, digest
 
 ROOT=Path(__file__).resolve().parents[1]
 REGIONS={'own_low':0,'own_high':1,'mid':2,'enemy_low':3,'enemy_high':4}
 
 
+def install_root():
+    return Path(os.environ.get('BBT_INSTALL_ROOT', ROOT/'install')).resolve()
+
+
+
+def runtime_snapshot(install):
+    """Record actual interface/module and ELF resolution, not just search paths."""
+    prefixes = [Path(p).resolve() for p in os.environ.get('AMENT_PREFIX_PATH', '').split(os.pathsep) if p]
+    for package in ('rm2027_interfaces', 'ros2_libxr', 'bbt_decide'):
+        marker = Path('share/ament_index/resource_index/packages')/package
+        found = next((prefix for prefix in prefixes if (prefix/marker).is_file()), None)
+        if found != (install/package).resolve():
+            raise RuntimeError(f'Overlay resolves {package} to {found}, expected {install/package}')
+    spec = importlib.util.find_spec('rm2027_interfaces.msg')
+    if not spec or not spec.origin or not Path(spec.origin).resolve().is_relative_to((install/'rm2027_interfaces').resolve()):
+        raise RuntimeError(f'Python interface resolves outside build receipt: {spec}')
+    libraries = {}
+    for executable in ('bbt_decide/lib/bbt_decide/bbt_decide_node', 'ros2_libxr/lib/ros2_libxr/ros2_libxr_node'):
+        output = subprocess.check_output(['ldd', str(install/executable)], text=True)
+        if 'not found' in output:
+            raise RuntimeError(f'Unresolved dynamic dependency of {executable}: {output}')
+        resolved = {}
+        for line in output.splitlines():
+            match = re.search(r'(?:=>\s+)?(/[^\s]+)\s+\(0x[0-9a-fA-F]+\)', line)
+            if match:
+                path = Path(match.group(1)).resolve(strict=True)
+                if path.name.startswith('librm2027_interfaces') and not path.is_relative_to((install/'rm2027_interfaces').resolve()):
+                    raise RuntimeError(f'Interface library resolves outside build receipt: {path}')
+                resolved[str(path)] = digest(path)
+        libraries[executable] = resolved
+    return {'python_interface': str(Path(spec.origin).resolve()), 'libraries': libraries}
+
+
 def source_manifest(arena):
-    paths=list((ROOT/'tools/arena').glob('*.py'))+[ROOT/'tools/run_tunnel_suite.py',ROOT/'tools/check_tunnel_suite.py']
+    paths=list((ROOT/'tools/arena').glob('*.py'))+[ROOT/'tools/run_tunnel_suite.py',ROOT/'tools/check_tunnel_suite.py',ROOT/'tools/build_acceptance_receipt.py',ROOT/'src/ros2_libxr/scripts/fake_lower_machine.py']
     paths+=list((ROOT/'src/bbt_decide/src').glob('*.cpp'))
     paths+=list((ROOT/'src/bbt_decide/include/bbt_decide').glob('*.hpp'))
     paths += [ROOT/p for p in ('src/bbt_decide/config/decision.yaml','src/bbt_decide/trees/main.xml',
-              'install/bbt_decide/lib/bbt_decide/bbt_decide_node','install/ros2_libxr/lib/ros2_libxr/ros2_libxr_node')]
+              )]
+    paths += [install_root()/p for p in ('bbt_decide/lib/bbt_decide/bbt_decide_node','ros2_libxr/lib/ros2_libxr/ros2_libxr_node')]
     paths += [arena/p for p in ('config/rules.json','rmuc_arena/engine.py','rmuc_arena/sdk.py',
               'simulation/target/release/rmuc-sim','simulation/src/physics.rs')]
-    return dict(arena_root=str(arena),files={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(set(paths))})
+    return dict(arena_root=str(arena),files={str(p):digest(p) for p in sorted(set(paths))})
 
 
 def rotate_geometry(config,team):
@@ -301,7 +337,7 @@ def run_one(args,index,direction):
                     else:preparation.cancel();stop_pub.publish(Twist());phase='prepare_unfold';last_command=-1.
             if phase=='prepare_unfold' and sentry['transform_progress']<=.001 and speed<=.12:
                 case.update(test_start_s=frame['time'],serial_at_test_start=dict(serial.rx_count))
-                command=[str(ROOT/'install/bbt_decide/lib/bbt_decide/bbt_decide_node'),'--ros-args','-p',f'config_file:={out}/decision.sim.yaml',
+                command=[str(install_root()/'bbt_decide/lib/bbt_decide/bbt_decide_node'),'--ros-args','-p',f'config_file:={out}/decision.sim.yaml',
                     '-p','data_source:=sim','-p',f'own_team:={args.team}','-p',"referee_protocol:='2027'",'-p',f'tree_file:={ROOT}/src/bbt_decide/trees/main.xml']
                 decision=subprocess.Popen(command,stdout=decision_log,stderr=decision_log);phase='test'
             if phase!='test' and frame['time']>args.prep_timeout:raise RuntimeError(f'preparation timeout in {phase}, physical pose {position}')
@@ -371,12 +407,35 @@ def main():
     ap.add_argument('--jobs',type=int,default=1,help='Parallel independent DDS domains (1..6).')
     ap.add_argument('--worker',action='store_true',help=argparse.SUPPRESS)
     ap.add_argument('--output',type=Path,required=True)
+    ap.add_argument('--build-receipt',type=Path,help='Verify build inputs and installed artifacts before and after the suite')
     args=ap.parse_args()
     if any(i not in range(6) for i in args.tunnels):ap.error('tunnel IDs must be 0..5')
     if not 1<=args.jobs<=6 or not 0<=args.domain<=232-args.jobs:ap.error('invalid jobs/domain range')
-    args.output=args.output.resolve();args.arena_root=args.arena_root.resolve();args.output.mkdir(parents=True,exist_ok=True)
-    if args.worker:return 0 if run_one(args,args.tunnels[0],args.direction)['passed'] else 1
-    sources=source_manifest(args.arena_root);(args.output/'source_manifest.json').write_text(json.dumps(sources,indent=2)+'\n')
+    args.output=args.output.resolve();args.arena_root=args.arena_root.resolve()
+    if args.worker:
+        return 0 if run_one(args,args.tunnels[0],args.direction)['passed'] else 1
+    args.output.mkdir(parents=True,exist_ok=True)
+    if any(args.output.iterdir()):
+        raise RuntimeError(f'Acceptance output directory must be empty: {args.output}')
+    if args.build_receipt is None:
+        ap.error('--build-receipt is required for tunnel acceptance')
+    receipt = None
+    if args.build_receipt:
+        receipt_path = args.build_receipt.resolve()
+        receipt = json.loads(receipt_path.read_text())
+        verified_install = validate_receipt(receipt)
+        prefixes = os.environ.get('AMENT_PREFIX_PATH', '').split(os.pathsep)
+        if not all(str(verified_install/package) in prefixes for package in ('rm2027_interfaces', 'ros2_libxr', 'bbt_decide')):
+            raise RuntimeError(f'Source {verified_install}/setup.bash before acceptance')
+        os.environ['BBT_INSTALL_ROOT'] = str(verified_install)
+        (args.output/'build_receipt.json').write_text(json.dumps(receipt,indent=2,ensure_ascii=False)+'\n')
+    sources=source_manifest(args.arena_root)
+    sources['build_receipt'] = ({'status':'verified_at_start', 'sha256':digest(receipt_path)} if receipt else {'status':'not_provided'})
+    sources['invocation'] = sys.argv
+    if receipt:
+        sources['runtime_resolution'] = runtime_snapshot(verified_install)
+    sources['config'] = {'path':str(args.config.resolve()), 'sha256':digest(args.config)}
+    (args.output/'source_manifest.json').write_text(json.dumps(sources,indent=2)+'\n')
     cases=[(i,d) for i in args.tunnels for d in (('forward','reverse') if args.direction=='both' else (args.direction,))]
     def child(item):
         n,(i,d)=item
@@ -385,15 +444,30 @@ def main():
             '--test-timeout',str(args.test_timeout),'--continuation-timeout',str(args.continuation_timeout),'--output',str(args.output)]
         return subprocess.run(command,check=False).returncode
     # Groups retain exclusive DDS domains even if one run finishes early.
+    exit_codes=[]
     for offset in range(0,len(cases),args.jobs):
-        with ThreadPoolExecutor(max_workers=args.jobs) as pool:list(pool.map(child,enumerate(cases[offset:offset+args.jobs])))
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:exit_codes.extend(pool.map(child,enumerate(cases[offset:offset+args.jobs])))
     results=[]
-    for i,d in cases:
+    for (i,d),exit_code in zip(cases,exit_codes):
         name=yaml.safe_load(args.config.read_text())['tunnels'][i]['name']
         path=args.output/f'{i}_{name}_{d}_{args.team}'/'validation.json'
-        results.append(json.loads(path.read_text()) if path.exists() else dict(passed=False,tunnel=name,direction=d,error='worker produced no validation'))
+        result = json.loads(path.read_text()) if path.exists() else dict(passed=False,tunnel=name,direction=d,error='worker produced no validation')
+        if exit_code != 0 and result.get('passed'):
+            result = dict(passed=False,tunnel=name,direction=d,error=f'worker exited {exit_code} despite passing validation')
+        results.append(result)
     (args.output/'suite.json').write_text(json.dumps(results,indent=2))
-    if source_manifest(args.arena_root)!=sources:raise RuntimeError('Acceptance sources changed during suite; rerun the final version')
+    if source_manifest(args.arena_root)!={k:v for k,v in sources.items() if k not in ('build_receipt','invocation','config','runtime_resolution')}:
+        raise RuntimeError('Acceptance sources changed during suite; rerun the final version')
+    if digest(args.config) != sources['config']['sha256']:
+        raise RuntimeError('Acceptance config changed during suite')
+    if receipt:
+        if digest(receipt_path) != sources['build_receipt']['sha256']:
+            raise RuntimeError('Build receipt changed during suite')
+        validate_receipt(receipt)
+        if runtime_snapshot(verified_install) != sources['runtime_resolution']:
+            raise RuntimeError('Resolved runtime dependencies changed during suite')
+        sources['build_receipt']['status'] = 'verified_at_start_and_end'
+    (args.output/'source_manifest.json').write_text(json.dumps(sources,indent=2)+'\n')
     return 0 if all(r['passed'] for r in results) else 1
 
 

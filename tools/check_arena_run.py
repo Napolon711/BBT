@@ -19,7 +19,11 @@ def check(path, tunnel=False, purchase=False, recovery=False):
         'has_goals':result['goal_count']>0,
     }
     completed=[]
-    for definition in config.get('tunnels',[]):
+    geometry=config.get('tunnels',[])
+    if 'own_team' in result:
+        from run_tunnel_suite import rotate_geometry
+        geometry=rotate_geometry(config,result['own_team'])
+    for definition in geometry:
         for entry,exit in [(definition['align'][0]['p'],definition['align'][1]['p']),
                            (definition['align'][1]['p'],definition['align'][0]['p'])]:
             arrived=[s for s in samples if s['goal'] and math.dist(s['goal'],entry)<.01 and s['nav']==2 and math.dist(s['pos'],entry)<=.1]

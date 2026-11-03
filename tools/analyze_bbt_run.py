@@ -7,6 +7,25 @@ import math
 from pathlib import Path
 import sys
 
+
+def center_handoffs(rows,cfg,team):
+    from run_tunnel_suite import rotate_geometry
+
+    centers={tuple(t['center']) for t in rotate_geometry(cfg,team)}
+    goals=[event for event in rows if event['kind']=='goal']
+    handoffs=[]
+    for current_goal,next_goal in zip(goals,goals[1:]):
+        center=current_goal['data']['xy']
+        start=current_goal['time_s'];end=next_goal['time_s']
+        if tuple(center) not in centers:continue
+        arrival=next((control_event for control_event in rows
+                      if control_event['kind']=='control' and start<=control_event['time_s']<=end+.01
+                      and control_event['data']['goal']==center and control_event['data']['nav']==2),None)
+        if arrival:handoffs.append(dict(center=center,arrival_s=arrival['time_s'],
+            next_goal_s=end,handoff_s=round(end-arrival['time_s'],3)))
+    return handoffs
+
+
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('run',type=Path)
@@ -16,10 +35,9 @@ def main():
     replay=json.loads((run/'replay.json').read_text());meta=replay['metadata'];team=meta['own_team']
     rows=[json.loads(line) for line in (run/team/'interfaces.jsonl').open()]
     controls={round(e['time_s']*20):e['data'] for e in rows if e['kind']=='control'}
-    phases=Counter();trace={};coarse=Counter();goals=[]
+    phases=Counter();trace={};coarse=Counter()
     for e in rows:
         if e['kind']=='decision_trace':trace=e['data']
-        if e['kind']=='goal':goals.append(e)
         if e['kind']!='control':continue
         d=e['data'];phases[str(trace.get('phase',-1))]+=.1
         key=('decision_forbids_fire' if not d['attack_intent'][2] else
@@ -27,17 +45,8 @@ def main():
              'fire_requested' if d['action']['fire'] else 'alignment_or_weapon_gate')
         coarse[key]+=.1
     import yaml
-    from run_tunnel_suite import rotate_geometry
     cfg=yaml.safe_load((run/'decision.sim.yaml').read_text())
-    centers={tuple(t['center']) for t in rotate_geometry(cfg,team)}
-    handoffs=[]
-    for e,nxt in zip(goals,goals[1:]):
-        xy=e['data']['xy'];start=e['time_s'];end=nxt['time_s']
-        if tuple(xy) not in centers:continue
-        reached=next((q for q in rows if q['kind']=='control' and start<=q['time_s']<=end+.01
-                      and q['data']['goal']==xy and q['data']['nav']==2),None)
-        if reached:handoffs.append(dict(center=xy,arrival_s=reached['time_s'],
-            next_goal_s=end,handoff_s=round(end-reached['time_s'],3)))
+    handoffs=center_handoffs(rows,cfg,team)
     sys.path.insert(0,str(args.arena_root));from rmuc_arena.engine import Match
     from rmuc_arena import sdk
     from run_bbt_match import auto_aim

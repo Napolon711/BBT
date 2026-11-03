@@ -109,14 +109,21 @@ BBT 接收 UC `/referee/summary`（10–14 元素）及 RobotHP/FieldEvent/Sentr
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source install/setup.bash
-python3 tools/run_tunnel_suite.py --team red --jobs 6 --output runs/bbt_six_red
+build_dir="runs/bbt-acceptance-$(date -u +%Y%m%dT%H%M%SZ)"
+python3 tools/build_acceptance_receipt.py --output "$build_dir"
+source "$build_dir/install/setup.bash"
+python3 tools/run_tunnel_suite.py --build-receipt "$build_dir/build_receipt.json" \
+  --team red --jobs 6 --output runs/bbt_six_red
 python3 tools/check_tunnel_suite.py runs/bbt_six_red/0_own_road_tunnel_forward_red
+python3 tools/package_tunnel_evidence.py runs/bbt_six_red \
+  --output runs/bbt_six_red_evidence.zip
 ```
 
 每洞单独一场：从引擎出生点通过 ROS 和串口物理移动到测试侧，再启动生产 BBT。生成配置只选择既有点为固定任务并设置测试入口区域；不改点 ID、坐标、洞几何或引擎规则。验收检查入口单点目标、一次Nav2中心/出口任务、中心处持续运动且没有成功回执、折叠、真实屋顶穿越、出口展开及原目标继续导航。早期逐中心停车的记录保留为历史证据，不能作为连续途经点语义的验收。
 
-每场输出 `replay.json`（Arena rmuc-replay-v4）、`trajectory.jsonl`、`interfaces.jsonl`、`case.json`、`validation.json` 和配置差异。`suite.json` 汇总各洞结果，`source_manifest.json` 记录源文件与二进制哈希。源文件在验收期间变动会使本轮不能作为最终证据，须重新运行。
+每场输出 `replay.json`（Arena rmuc-replay-v4）、`trajectory.jsonl`、`interfaces.jsonl`、`case.json`、`validation.json` 和配置差异。`suite.json` 汇总各洞结果，`source_manifest.json` 引用构建收据并记录源文件、配置、运行库与二进制哈希。收据记录提交、源码状态、构建器与依赖版本、CMake 配置和安装产物摘要；它是本机执行记录，不是签名证明。验收开始和结束都会校验收据、源码和实际运行库，未提供收据时拒绝启动。
+
+`tools/package_tunnel_evidence.py` 生成可共享的精简 ZIP，保留收据、源清单、验证器、每场轨迹和配置，并在导出前重验轨迹及汇总。ZIP 不含完整 replay、ROS 接口日志或视频；需要深入排查时保留原始 `runs/` 目录。成功重验后可将 ZIP 作为 PR 附件或发布资产提供给审查者。没有构建收据的历史目录会标为未验证，不能追溯证明其二进制来源。
 
 `tools/run_arena.py --six-tunnels` 同样转到上述真实六洞验收，不再生成虚构的七区域链。普通短局可用 `tools/run_arena.py --team red --seconds 60 --output runs/bbt_smoke`；`--acceptance` 关闭前哨任务并提高买弹阈值以触发购买。
 

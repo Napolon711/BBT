@@ -76,3 +76,7 @@
 ## 实机边界
 
 本记录证明自动化与仿真结果。实际Nav2须提供规划、固定路径跟踪和连续多位姿Action；旧goal_pose执行器应停止。实车定位坐标、机构间隙、取消后的速度输出和下位机看门狗仍须按联调手册现场验证，不能以仿真代替。
+
+## 新验收的收据与分享包
+
+新的六洞验收先运行 `tools/build_acceptance_receipt.py`，再 source 收据对应的安装目录，并通过 `--build-receipt` 启动 `tools/run_tunnel_suite.py`。验收会在开始和结束核对源码输入、安装文件、动态库解析及收据摘要。可用 `tools/package_tunnel_evidence.py` 导出精简 ZIP；它重验每场轨迹和汇总，包含收据与复核所需输入，但省略大型 replay 和接口日志。旧 `runs/` 记录没有收据时保留历史状态，不会被追认为已关联构建。

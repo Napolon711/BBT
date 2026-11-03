@@ -51,7 +51,7 @@ class ArenaSerial:
         self.suppress_chassis = False
         self.bad_commands = 0
         self.log = open(log_path, 'w')
-        exe = DECISION_ROOT/'install/ros2_libxr/lib/ros2_libxr/ros2_libxr_node'
+        exe = Path(os.environ.get('BBT_INSTALL_ROOT', DECISION_ROOT/'install'))/'ros2_libxr/lib/ros2_libxr/ros2_libxr_node'
         self.proc = subprocess.Popen([str(exe), '--ros-args', '-p', f'port:={os.ttyname(self.slave)}',
                                       '-p', f'own_team:={self.team}'],
                                      stdout=self.log, stderr=self.log)

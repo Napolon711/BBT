@@ -31,11 +31,14 @@ def main():
     ap.add_argument('--fault-chassis', default='', help='Suppress chassis feedback during elapsed seconds START:END')
     ap.add_argument('--no-replay', action='store_true')
     ap.add_argument('--six-tunnels', action='store_true', help='Run six isolated production fallback tunnel cases with physical spawn preparation')
+    ap.add_argument('--build-receipt', type=Path, help='Build receipt required by --six-tunnels')
     args = ap.parse_args()
     if not 0 <= args.domain <= 232 or not math.isfinite(args.seconds) or args.seconds <= 0:
         ap.error('domain must be 0..232; seconds must be positive')
     if args.six_tunnels:
         command=[sys.executable,str(ROOT/'tools/run_tunnel_suite.py'),'--arena-root',str(args.arena_root),'--config',str(args.config),'--team',args.team,'--domain',str(args.domain),'--output',str(args.output)]
+        if args.build_receipt:
+            command.extend(['--build-receipt',str(args.build_receipt)])
         raise SystemExit(subprocess.call(command))
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
