@@ -226,6 +226,42 @@ void shipped_geometry_loads()
   }
 }
 
+void road_to_central_ground_seams_remain_in_mid()
+{
+  for (const auto* team : {"red", "blue"})
+  {
+    Config cfg;
+    std::string error;
+    std::vector<std::string> warnings;
+    CHECK(load_config(std::string(SRC_DIR) + "/config/decision.yaml", cfg, error, warnings));
+    configure_own_team(cfg, team);
+    const auto deployed = [team](Vec2 point) {
+      return std::string(team) == "blue" ? Vec2{28-point.x, 15-point.y} : point;
+    };
+    // Captured post-exit plan from the stalled demo. The road and the central
+    // slope differ by 4 mm at their seam; that ground must keep the mid label.
+    const std::vector<Vec2> path{{9.319998042489422, 1.0210346013193874},
+        {9.32, .45}, {11.716, 2.86}, {12.253446250469228, 6.771680015377857}, {15.69, 10.9}};
+    const int mid = region_for_position(cfg, deployed(path.back()));
+    CHECK(mid >= 0 && cfg.regions[mid] == "mid");
+    for (size_t i = 1; i < path.size(); ++i)
+      CHECK(segment_within_region(cfg, deployed(path[i-1]), deployed(path[i]), mid));
+    CHECK(region_for_position(cfg, deployed({10.95, 2.092})) == mid);
+    CHECK(region_for_position(cfg, deployed({17.05, 12.908})) == mid);
+    CHECK(segment_within_region(cfg, deployed({17.05, 12.90}), deployed({17.05, 12.915}), mid));
+    // The neighboring low region, its shared boundary and all tunnel bodies
+    // retain their existing meaning; this is not a general cross-region permit.
+    const int red_low = region_for_position(cfg, deployed({13.5, 2.085}));
+    const int blue_low = region_for_position(cfg, deployed({14.5, 12.915}));
+    CHECK(red_low >= 0 && cfg.regions[red_low] == "own_low");
+    CHECK(blue_low >= 0 && cfg.regions[blue_low] == "enemy_low");
+    CHECK(region_for_position(cfg, deployed({13.5, 2.09})) == -1);
+    CHECK(!segment_within_region(cfg, deployed({13.5, 2.07}), deployed({13.5, 2.10}), mid));
+    CHECK(segment_crosses_tunnel(cfg, deployed({9.32, .45}), deployed({9.32, 3.6})));
+    CHECK(validate_geometry(cfg, error));
+  }
+}
+
 void production_points_clear_finite_tunnel_segments()
 {
   std::ifstream input(std::string(SRC_DIR) + "/config/decision.yaml");
@@ -343,6 +379,7 @@ int main()
   completed_traversal_only_clears_its_authorized_exit();
   frame_and_team_transform_every_geometry();
   shipped_geometry_loads();
+  road_to_central_ground_seams_remain_in_mid();
   production_points_clear_finite_tunnel_segments();
   patrol_point_configuration();
   std::cout << "geometry tests passed\n";
