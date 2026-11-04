@@ -21,7 +21,8 @@
 - 只解 **旋转 + 平移**（dx, dy, dyaw_deg），不解缩放：两边都是米制，建图不该有
   尺度差；若确实有尺度漂移，加 --scale 会同时解出 s（写进 yaml 前需要扩展字段）。
 - 2 个分散点 → 唯一解；≥3 个点 → 最小二乘；单点只有在已知 map 朝向时可解平移。
-- --team blue 会先将场地点旋转为 (28-x, 15-y)，再解蓝方 map 变换。
+- 正式场地 --team blue 会先将场地点旋转为 (28-x, 15-y)，再解蓝方 map 变换；
+  自定义地图 geometry_reference: none 不换边，与决策运行时一致。
 - 对齐后 BBT 加载配置时会把 points / tunnels 的全部坐标一起搬到建图系，
   发给导航的 /goal_pose 与收到的 /odom 就在同一系里了。
 - 仿真必须提供与点表一致的场地坐标；实车标定后必须 enabled: true。
@@ -122,13 +123,19 @@ def write_yaml(cfg_path, dx, dy, dyaw, key="field_to_map"):
         k, v = entries[0]
         if v.start_mark.index < k.end_mark.index:
             sys.exit(f"{key} 使用 YAML alias，请先展开为独立标定块")
-        new = s[:k.start_mark.index] + block + s[v.end_mark.index:]
+        end = v.end_mark.index
+        if isinstance(v, yaml.MappingNode) and not v.flow_style and v.value:
+            # block mapping 的 end_mark 包含随后注释；标定块只替换到最后一个值。
+            end = v.value[-1][1].end_mark.index
+        new = s[:k.start_mark.index] + block + s[end:]
     elif key == "blue_field_to_map":
         # 插在 root mapping 末尾、文档结束标记 (...) 之前。
         end = root.end_mark.index
         new = s[:end].rstrip("\n") + "\n" + block + s[end:]
     else:
         sys.exit("没找到 field_to_map 块（yaml 里没有这一段的话手工加上再跑）")
+    if not new.endswith("\n"):
+        new += "\n"
     # 例如被其他块引用的 anchor 不能因替换而留下悬空 alias；失败时保留原文件。
     yaml.safe_load(new)
     with io.open(cfg_path, "w", encoding="utf-8") as stream:

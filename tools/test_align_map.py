@@ -117,6 +117,35 @@ class AlignMapTests(unittest.TestCase):
                 align_map.write_yaml(path, 4, 5, 6)
             self.assertEqual(path.read_text(encoding="utf-8"), original)
 
+    def test_recalibration_preserves_comments_and_final_newline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "decision.yaml"
+            path.write_text("field_to_map:\n  enabled: true\n  dx: 1\n  dy: 2\n"
+                            "  dyaw_deg: 3\n# Blue transform\n"
+                            "blue_field_to_map: {dx: 10}", encoding="utf-8")
+            align_map.write_yaml(path, 4, 5, 6)
+            result = path.read_text(encoding="utf-8")
+            self.assertIn("# Blue transform\nblue_field_to_map: {dx: 10}", result)
+            self.assertTrue(result.endswith("\n"))
+
+    def test_cli_custom_map_skips_team_rotation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "decision.yaml"
+            path.write_text("field_to_map: {enabled: true, dx: 0, dy: 0, dyaw_deg: 0}\n",
+                            encoding="utf-8")
+            pairs = Path(temp) / "pairs.csv"
+            pairs.write_text("id,field_x,field_y,map_x,map_y\norigin,1,2,0,0\n",
+                             encoding="utf-8")
+            result = subprocess.run([sys.executable, str(Path(align_map.__file__)),
+                                     str(pairs), "--config", str(path), "--team", "blue",
+                                     "--dyaw-deg", "90", "--write"],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            import yaml
+            config = yaml.safe_load(path.read_text(encoding="utf-8"))
+            self.assertEqual(config["blue_field_to_map"],
+                             {"enabled": True, "dx": 2, "dy": -1, "dyaw_deg": 90})
+
 
 if __name__ == "__main__":
     unittest.main()
