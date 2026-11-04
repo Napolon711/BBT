@@ -7,10 +7,12 @@
 #include <cmath>
 #include <fstream>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "bbt_decide/types.hpp"
+#include "bbt_decide/geometry.hpp"
 
 namespace bbt_decide
 {
@@ -112,6 +114,13 @@ static bool load_config_impl(const std::string& path, Config& cfg, std::string& 
   cfg = Config{};  // 从干净状态开始：调用方可能复用同一个对象（中途失败的加载会留下半截数据）
   error.clear();
   warnings.clear();
+  read_str(root, "geometry_reference", cfg.geometry_reference);
+  if (cfg.geometry_reference != "red" && cfg.geometry_reference != "blue" &&
+      cfg.geometry_reference != "none")
+  {
+    error = "geometry_reference 只能是 red、blue 或 none";
+    return false;
+  }
 
   // ---- 过洞总开关（显式，最先读：它决定 region/洞表整套要不要）----
   if (root["enable_tunnel"]) cfg.enable_tunnel = root["enable_tunnel"].as<bool>();
@@ -147,6 +156,28 @@ static bool load_config_impl(const std::string& path, Config& cfg, std::string& 
     }
   }
 
+  // 多个简单多边形可属于同一区域；不同区域不允许内部重叠。
+  if (root["region_geometry"])
+  {
+    if (!root["region_geometry"].IsSequence())
+    { error = "region_geometry 必须是多边形列表"; return false; }
+    for (const auto& it : root["region_geometry"])
+    {
+      RegionGeometry cell;
+      cell.name = it["name"].as<std::string>();
+      if (!it["polygon"] || !it["polygon"].IsSequence())
+      { error = "region_geometry." + cell.name + ".polygon 必须是坐标列表"; return false; }
+      for (const auto& node : it["polygon"])
+      {
+        Vec2 p;
+        if (!read_xy(node, p))
+        { error = "region_geometry." + cell.name + " 的顶点必须是[x,y]"; return false; }
+        cell.polygon.push_back(p);
+      }
+      cfg.region_geometry.push_back(std::move(cell));
+    }
+  }
+
   // ---- 开局区域（区域表存在才有意义；没有区域时保持默认 0，不参与任何判定）----
   if (!cfg.regions.empty())
   {
@@ -169,6 +200,16 @@ static bool load_config_impl(const std::string& path, Config& cfg, std::string& 
     read_double(n, "dy", cfg.field_to_map.dy);
     read_double(n, "dyaw_deg", cfg.field_to_map.dyaw_deg);
   }
+  cfg.active_field_to_map = cfg.field_to_map;
+  if (root["blue_field_to_map"])
+  {
+    const auto& n = root["blue_field_to_map"];
+    cfg.field_to_map_blue.enabled = n["enabled"] ? n["enabled"].as<bool>() : true;
+    read_double(n, "dx", cfg.field_to_map_blue.dx);
+    read_double(n, "dy", cfg.field_to_map_blue.dy);
+    read_double(n, "dyaw_deg", cfg.field_to_map_blue.dyaw_deg);
+    cfg.has_field_to_map_blue = true;
+  }
 
   // ---- 阈值（全部可选，缺省用代码里的默认值）----
   if (root["safety"])
@@ -185,6 +226,8 @@ static bool load_config_impl(const std::string& path, Config& cfg, std::string& 
     read_int(s, "switch_confirm_frames", cfg.switch_confirm_frames);
     read_double(s, "gate_clear_m", cfg.gate_clear_m);
     read_double(s, "op_goal_timeout_s", cfg.op_goal_timeout_s);
+    read_double(s, "op_min_hold_s", cfg.op_min_hold_s);
+    read_double(s, "op_combat_clear_s", cfg.op_combat_clear_s);
     read_double(s, "nav_timeout_s", cfg.nav_timeout_s);
     read_double(s, "nav_retry_s", cfg.nav_retry_s);
     read_double(s, "fold_timeout_s", cfg.fold_timeout_s);
@@ -201,13 +244,16 @@ static bool load_config_impl(const std::string& path, Config& cfg, std::string& 
   {
     const auto& b = root["auto_buy"];
     if (b["enable"]) cfg.enable_auto_buy = b["enable"].as<bool>();
+    if (b["revive_enable"]) cfg.enable_auto_revive = b["revive_enable"].as<bool>();
     read_int(b, "ammo_min_shots", cfg.ammo_buy_min_shots);
     read_int(b, "ammo_rounds", cfg.ammo_buy_rounds);
     read_int(b, "ammo_min_coins", cfg.ammo_buy_min_coins);
     read_double(b, "hp_ratio", cfg.hp_buy_ratio);
     read_int(b, "hp_amount", cfg.hp_buy_amount);
     read_int(b, "hp_min_coins", cfg.hp_buy_min_coins);
+    // 旧负门槛仍可表示关闭；非负旧值不再增加裁判报价之外的金币门槛。
     read_int(b, "revive_min_coins", cfg.revive_buy_min_coins);
+    if (cfg.revive_buy_min_coins < 0 && !b["revive_enable"]) cfg.enable_auto_revive = false;
     read_double(b, "cooldown_s", cfg.buy_cooldown_s);
   }
 
@@ -249,6 +295,27 @@ static bool load_config_impl(const std::string& path, Config& cfg, std::string& 
         p.region = -1;  // 不过洞：区域字段可省
       }
       cfg.points.push_back(p);
+    }
+  }
+
+  // 可选巡逻环只筛选巡逻任务，不改变点表zone或其他任务对同一点的使用。
+  if (root["patrol_point_ids"])
+  {
+    const auto& ids = root["patrol_point_ids"];
+    if (!ids.IsSequence())
+    { error = "patrol_point_ids 必须是点ID列表"; return false; }
+    std::set<int> unique_ids;
+    for (const auto& node : ids)
+    {
+      const int id = node.as<int>();
+      if (!unique_ids.insert(id).second)
+      { error = "patrol_point_ids 的点ID重复: " + std::to_string(id); return false; }
+      const PointDef* point = nullptr;
+      for (const auto& candidate : cfg.points)
+        if (candidate.id == id) point = &candidate;
+      if (!point || point->zone != kZonePatrol)
+      { error = "patrol_point_ids 的点必须存在且zone为patrol: " + std::to_string(id); return false; }
+      cfg.patrol_point_ids.push_back(id);
     }
   }
 
@@ -298,6 +365,19 @@ static bool load_config_impl(const std::string& path, Config& cfg, std::string& 
         {
           error = "洞 " + t.name + " 的 center 必须是 [x, y]";
           return false;
+        }
+        t.has_center = static_cast<bool>(it["center"]);
+        if (it["corners"])
+        {
+          if (!it["corners"].IsSequence())
+          { error = "洞 " + t.name + " 的corners必须是坐标列表"; return false; }
+          for (const auto& corner : it["corners"])
+          {
+            Vec2 p;
+            if (!read_xy(corner, p))
+            { error = "洞 " + t.name + " 的corners顶点必须是[x,y]"; return false; }
+            t.corners.push_back(p);
+          }
         }
         cfg.tunnels.push_back(t);
       }
@@ -391,14 +471,54 @@ static bool load_config_impl(const std::string& path, Config& cfg, std::string& 
   {
     const FrameTransform& ft = cfg.field_to_map;
     for (auto& p : cfg.points) p.pos = apply_frame_transform(p.pos, ft);
+    for (auto& cell : cfg.region_geometry)
+      for (auto& p : cell.polygon) p = apply_frame_transform(p, ft);
     for (auto& t : cfg.tunnels)
     {
       t.align[0] = apply_frame_transform(t.align[0], ft);
       t.align[1] = apply_frame_transform(t.align[1], ft);
       t.center = apply_frame_transform(t.center, ft);
+      for (auto& p : t.corners) p = apply_frame_transform(p, ft);
     }
   }
   return true;
+}
+
+void configure_own_team(Config& cfg, const std::string& team)
+{
+  if (team != "red" && team != "blue")
+    throw std::invalid_argument("own_team 必须为 red 或 blue");
+  if (!cfg.own_team.empty())
+  {
+    if (cfg.own_team != team) throw std::invalid_argument("own_team 在本次运行中不可修改");
+    return;
+  }
+  const FrameTransform target_transform =
+      team == "blue" && cfg.has_field_to_map_blue ? cfg.field_to_map_blue : cfg.field_to_map;
+  const bool rotate_field = cfg.geometry_reference != "none" && cfg.geometry_reference != team;
+  const auto to_team_map = [&](Vec2& p) {
+    Vec2 field = inverse_frame_transform(p, cfg.field_to_map);
+    if (rotate_field) field = {28.0 - field.x, 15.0 - field.y};
+    p = apply_frame_transform(field, target_transform);
+    if (!std::isfinite(p.x) || !std::isfinite(p.y))
+      throw std::invalid_argument("换边或地图标定后坐标溢出");
+  };
+  // 配置加载时所有几何先进入红方基准 map；还原到场地系后，再按当前阵营
+  // （蓝方先绕场心旋转）转换到对应导航 map，避免沿用红方 map 原点。
+  if (cfg.field_to_map.enabled || target_transform.enabled || rotate_field)
+  {
+    for (auto& p : cfg.points) to_team_map(p.pos);
+    for (auto& cell : cfg.region_geometry)
+      for (auto& p : cell.polygon) to_team_map(p);
+    for (auto& t : cfg.tunnels)
+    {
+      to_team_map(t.align[0]); to_team_map(t.align[1]);
+      if (t.has_center) to_team_map(t.center);
+      for (auto& p : t.corners) to_team_map(p);
+    }
+  }
+  cfg.active_field_to_map = target_transform;
+  cfg.own_team = team;
 }
 
 bool load_config(const std::string& path, Config& cfg, std::string& error,
@@ -429,6 +549,7 @@ bool load_config(const std::string& path, Config& cfg, std::string& error,
         { error = "洞 " + t.name + " 的变换后坐标必须是有限数值"; return false; }
       }
     }
+    if (!validate_geometry(parsed, error)) return false;
     if (!std::isfinite(parsed.nav_timeout_s) || parsed.nav_timeout_s <= 0 ||
         !std::isfinite(parsed.nav_retry_s) || parsed.nav_retry_s < 0 ||
         !std::isfinite(parsed.fold_timeout_s) || parsed.fold_timeout_s <= 0 ||
@@ -438,8 +559,9 @@ bool load_config(const std::string& path, Config& cfg, std::string& error,
     if (!(parsed.hp_home_ratio >= 0 && parsed.hp_resume_ratio >= parsed.hp_home_ratio && parsed.hp_resume_ratio <= 1) ||
         (parsed.ammo_home_min >= 0 && parsed.ammo_resume_min < parsed.ammo_home_min) ||
         parsed.switch_confirm_frames <= 0 || !std::isfinite(parsed.odom_stale_ms) || parsed.odom_stale_ms <= 0 ||
-        !std::isfinite(parsed.op_goal_timeout_s) || parsed.op_goal_timeout_s <= 0)
-    { error = "safety: 恢复阈值不得低于触发阈值，帧数/位姿时效/指点超时必须为正"; return false; }
+        !std::isfinite(parsed.op_min_hold_s) || parsed.op_min_hold_s < 0 ||
+        !std::isfinite(parsed.op_combat_clear_s) || parsed.op_combat_clear_s < 0)
+    { error = "safety: 恢复阈值不得低于触发阈值，帧数/位姿时效必须为正，人工目标停留/脱战时间必须非负"; return false; }
     if (parsed.gate_clear_m < 0 || parsed.in_tunnel_margin_m < 0 ||
         parsed.arrive_radius_m < 0 || parsed.op_snap_m < 0)
     { error = "safety/outpost: gate_clear_m、in_tunnel_margin_m、arrive_radius_m、snap_m 必须非负"; return false; }

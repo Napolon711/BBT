@@ -18,8 +18,8 @@
 //      入口 = 绑定"车当前区域"的对正点，出口 = 绑定"目标区域"的那个。多洞 BFS 串联；
 //   3) 数据一律从真实 ROS 话题进出（见 RosPorts），仿真数据由 Arena 桥按同一套
 //      话题发进来，没有任何进程内注水通道；
-//   4) 地图对齐：点表按场地图纸系填，field_to_map（旋转 + 平移）在加载时把全部
-//      点搬到导航建图系（tools/align_map.py 解算，与主工作区同款）。
+//   4) 地图对齐：点表按红方基准场地图纸系填，field_to_map（以及可选的
+//      blue_field_to_map）在启动时把当前阵营几何搬到对应导航建图系。
 #pragma once
 
 #include <cmath>
@@ -31,7 +31,7 @@ namespace bbt_decide
 {
 
 // 二维点 / 二维向量。单位 m。不带坐标系信息：点表按场地系（图纸/STL）填，
-// config 加载时经 field_to_map 统一搬到导航地图系，之后全场只有地图系。
+// config 加载时经当前阵营的场地→map 变换统一搬到导航地图系，之后全场只有地图系。
 struct Vec2
 {
   double x = 0.0;  // X 坐标，单位 m
@@ -48,6 +48,18 @@ struct FrameTransform
   double dy = 0.0;        // 平移量 y，单位 m
   double dyaw_deg = 0.0;  // 旋转量，单位度，逆时针为正
 };
+
+// 逆变换：导航 map 系 → 该变换对应的场地系。
+inline Vec2 inverse_frame_transform(const Vec2& p, const FrameTransform& t)
+{
+  if (!t.enabled) return p;
+  const double a = t.dyaw_deg * 3.14159265358979323846 / 180.0;
+  const double c = std::cos(a);
+  const double s = std::sin(a);
+  const double x = p.x - t.dx;
+  const double y = p.y - t.dy;
+  return Vec2{c * x + s * y, -s * x + c * y};
+}
 
 // 把一个点从场地系变换到地图系：先绕原点旋转 dyaw_deg，再平移 (dx, dy)。
 // 参数：p — 场地系点；t — 变换参数。返回：地图系点。纯函数。
@@ -79,17 +91,8 @@ constexpr int kCtrlFull = 0;      // 己方完全控制
 constexpr int kCtrlTemp = 1;      // 己方临时控制
 constexpr int kCtrlNone = 2;      // 己方未控制（对方控制 / 争夺中）
 
-// 区域（region）：用户自定义的"场地分片"，只用于**过洞路由**，不是几何多边形。
-// yaml 里的 regions: 是一张名字表（名字随意，数量随意），代码里用下标当区域号。
-// 走廊可以就 [left, right]；正式场地写 [own_low, own_high, mid, enemy_low, enemy_high]。
-//
-// 车当前区域 = **纯记账**，不做任何几何判定（不比最近点、不订阅区域话题）：
-//   开赛沿写 start_region（开赛时车摆在哪个区，start_region 就配哪个）；
-//   每次过洞完成写出口对正点绑定的 region——这是唯一更新点。
-// 为什么记账就够（使用者口径）：车只会按决策发的导航目标移动，跨区域的移动必然
-// 走"过洞流程"，过洞完成必写出口区域 → 记账自洽，不存在车绕开决策换区的路径。
-// （代价：比赛中被外力推着穿过洞/被搬走，记账不会自己纠正——靠洞口"未折叠
-// 拒绝裸穿"保护和下一次开赛沿重置兜底；真需要外部修正时再加接口不迟。）
+// Region geometry assigns arbitrary coordinates; explicit region IDs are checked at load.
+// Crossing completion records the exit region; localization verifies the entry service side.
 
 // 点表里的一条记录：一个可以导航过去的点。
 // 坐标按场地系手填（加载时统一搬到地图系）；id 全场唯一；region 必填。
@@ -104,13 +107,21 @@ struct PointDef
 // 一段洞（需要折叠云台才能穿的通道）的定义。
 // align[k] 是第 k 个对正点，align_region[k] 声明它服务哪个区域 —— 车在哪个区域，
 // 就用绑定该区域的对正点当入口，另一个当出口。方向就这么定，不做几何猜测。
-// center（可选）= 洞中心，给 tools/align_map.py 当对齐基准，不参与逻辑。
+// center（可选）作为连续穿越途经点；corners是洞体几何投影。
+struct RegionGeometry
+{
+  std::string name;
+  std::vector<Vec2> polygon;
+};
+
 struct TunnelDef
 {
+  std::vector<Vec2> corners;          // 洞体在地图系的几何投影
   std::string name;                  // 洞名，日志用，不参与逻辑
   Vec2 align[2];                     // 两个对正点，各在洞一侧，单位 m（加载后地图系）
   int align_region[2] = {-1, -1};    // 对正点各自服务的区域下标；未填(-1)的洞整条跳过
-  Vec2 center;                       // 洞中心（可选，地图对齐基准）
+  Vec2 center;                       // 洞中心（可选，折叠后先到中心再到出口）
+  bool has_center = false;           // 未配置中心时兼容入口→出口的简单走廊
 };
 
 // 裁判系统快照：摘要与 typed 裁判数据合成。
@@ -149,7 +160,7 @@ struct RefereeSnapshot
 // 收到也只记下序号忽略；效果从裁判数据里看（血量/弹量涨了就是买到了）。
 // seq 是指令序号（发送侧每条 +1，0 = 无指令）：决策层按它去重，同一条只处理一次。
 // 实车链路（裁判 0x0303 小地图点击）给的是**坐标**而不是点表 id：type=4 时
-// param = -1、x/y = 点击坐标，决策层把它吸附到最近的点表点（半径 op_snap_m 内才接）。
+// param = -1、x/y = 红方基准场地坐标；蓝方先绕场心旋转180度，再用蓝方地图标定。
 struct OpCmd
 {
   uint32_t seq = 0;   // 指令序号；0 = 没有指令
@@ -257,6 +268,9 @@ inline TopicMap default_topic_map()
 // 注意：field_to_map 在加载末尾生效 —— points / tunnels 的坐标全部被搬到地图系。
 struct Config
 {
+  // 正式场地点表与 27BT-UC 一致，以 red 为基准；none 用于不换边的自定义地图。
+  std::string geometry_reference = "none"; // red / blue / none
+  std::string own_team;                    // 启动后由人工 own_team 参数固定
   // ---- 过洞总开关（显式）----
   // false = 这套车不过洞：region 表、点的 region 字段、洞表**全部不需要**（region
   // 与过洞功能耦合在一起——region 只为过洞路由而存在）。所有点视为互相直连，
@@ -270,18 +284,26 @@ struct Config
   // 数据未知（-1）的一侧不参与判定（不知道就当没事，别乱跑）。
   // false = 整套前哨逻辑不存在（走廊等没有前哨的地图），outpost/retake 点也不需要。
   bool enable_outpost = true;
-  double op_goal_timeout_s = 120.0; // 指点过期后恢复规则决策；跨洞恢复仍须先完成
-  double op_snap_m = 1.5;  // 操作手坐标指点吸附半径：点击处 m 内最近的点表点才算数，
-                           // 半径内没有点 = 忽略这次点击（防误点墙上/场外）
+  double op_min_hold_s = 20.0;       // 最终目标成功后的最短保持
+  double op_combat_clear_s = 10.0;   // 到达后裁判连续脱战的解除时间
+  double op_goal_timeout_s = 120.0; // 旧配置兼容字段；不再用于人工任务过期
+  double op_snap_m = 1.5;           // 旧配置兼容字段；不再吸附坐标
 
   // ---- 手填配置表（决策只引用 id / 区域下标，坐标全在这里改）----
+  std::vector<RegionGeometry> region_geometry;
   std::vector<std::string> regions;  // 区域名表（下标 = 区域号）；换地图改这张表。
                                      // 仅 enable_tunnel = true 时必填
   int start_region = 0;              // 开局所在区域（下标）：开赛沿把记账重置成它，
                                      // 之后唯一的更新点是每次过洞完成写出口区域
   std::vector<PointDef> points;      // 点表：家 + 巡逻点（enable_tunnel=true 时各绑区域）
+  std::vector<int> patrol_point_ids; // 可选巡逻环ID顺序；空/未配时沿用全部patrol点表顺序
   std::vector<TunnelDef> tunnels;    // 洞表：每条两个对正点 + 各自服务的区域
-  FrameTransform field_to_map;       // 场地系 → 地图系（align_map.py 解算；加载时生效）
+  FrameTransform field_to_map;       // 红方基准场地系 → 红方 map（兼容旧配置）
+  // 可选的蓝方导航地图标定。缺省时沿用 field_to_map，保持旧配置语义。
+  // field_to_map 仍是红方基准；蓝方几何先按场心换边，再应用这个变换。
+  FrameTransform field_to_map_blue;
+  bool has_field_to_map_blue = false;
+  FrameTransform active_field_to_map; // configure_own_team 选定的当前导航 map 标定
   bool require_map_alignment = false; // 正式地图实车必须显式标定，恒等也要 enabled=true
 
   // ---- 阈值（单位见各字段注释）----
@@ -306,8 +328,9 @@ struct Config
                                   // 买不到再走回家那条路
   int hp_buy_amount = 1;          // 一次远程回血请求；恢复量由裁判规则决定
   int hp_buy_min_coins = 300;     // 金币低于此值不买血
-  int revive_buy_min_coins = 200; // 金币 ≥ 此值且 hp==0（=阵亡，不需要单独的阵亡判定）
-                                  // → 下单买复活；-1 = 不自动买复活
+  bool enable_auto_revive = true; // 独立复活开关，不设置额外金币策略门槛
+  int revive_buy_min_coins = 200; // 旧配置兼容；负值在未指定独立开关时关闭复活，
+                                  // 非负值不再构成额外金币门槛
   double buy_cooldown_s = 10.0;   // 同一类购买的下单间隔（等远程兑换到账）。
                                   // 比赛外不下单（比赛外一条消息不发；备赛采购是
                                   // 操作手手动的事）
@@ -336,9 +359,13 @@ struct Config
 // 决策树一帧的输出。执行层（Runner）拿它去发导航目标/折叠指令。
 struct Decision
 {
-  int target_point = -1;   // 点表 id；-1 = 原地保持（停车）
-  int tunnel_id = -1;      // 洞表下标；-1 = 本帧不需要过洞
-  uint64_t stamp_ms = 0;   // 决策生成时刻，单调毫秒
+  int target_point = -1;   // 配置点ID；-3为任意坐标人工目标
+  PointDef target;
+  bool target_valid = false;
+  bool operator_target = false;
+  uint64_t generation = 0;  // 人工目标身份；自主配置点为0
+  int tunnel_id = -1;
+  uint64_t stamp_ms = 0;
 };
 
 // 加载 yaml 配置（与 decision.yaml 一一对应）。
@@ -347,5 +374,9 @@ struct Decision
 // 返回：true = 成功。失败时 cfg 内容未定义。
 bool load_config(const std::string& path, Config& cfg, std::string& error,
                  std::vector<std::string>& warnings);
+
+// 开局只调用一次：在场地系旋转敌我战术几何，然后仍输出导航 map 系坐标。
+// team 必须由操作员指定 red/blue，不读取裁判机器人 ID。
+void configure_own_team(Config& cfg, const std::string& team);
 
 }  // namespace bbt_decide

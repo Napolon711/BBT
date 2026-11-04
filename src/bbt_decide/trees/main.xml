@@ -1,36 +1,166 @@
 <?xml version="1.0"?>
-<!--
-  BBT 保底决策树主树（与主工作区 trees/main.xml 同风格）。
-
-  ReactiveSequence 每 tick 从头重跑：门控失败 → 整体 FAILURE → Standby 接管。
-  过洞（TunnelCross）优先于常规导航（NavCruise）：跨区域目标必须折叠过洞，
-  绝不裸穿；与过洞无关时 TunnelCross 让位。
-
-  节点说明（逻辑全部在 planner.cpp 的纯函数里，树只做编排）：
-    IsMatchRunning  操作手指令 + 自动购买 + 比赛门控（game_progress==4）；
-                     开赛沿：切底盘模式 + 区域记账重置为 start_region
-    DecideTarget    决策树：操作手指点 → 血量/弹量锁存回家 → 巡逻轮换+换点防抖
-    TunnelCross     过洞五段状态机：入口对正点→折叠→出口对正点→展开；
-                    完成时区域记账 = 出口对正点的 region（纯记账的唯一更新点）
-    NavCruise       常规导航：换点/操作手重指点先取消再发；失败按节奏重试；
-                    空目标停车；非过洞段恒发受击旋转 spin_w
-    Standby         比赛外静默：结束沿一次性收尾（终止过洞+取消导航+停自旋），
-                    之后一条消息不发
-
-  区域没有独立节点：纯记账（开赛沿重置 + 过洞完成写出口），见 planner.cpp。
--->
+<!-- Native blackboard keys: config, io, sense, plan, execution and target.
+     Each leaf maps only its declared domain ports; config and io are initialized
+     by C++, while runtime state lives in the blackboard across reactive halts.
+     Business priority and tunnel sequencing remain explicit in this tree.
+     Unique instance names identify the branch and operation in logs and tooling. -->
 <root BTCPP_format="4" main_tree_to_execute="Main">
   <BehaviorTree ID="Main">
-    <ReactiveFallback>
-      <ReactiveSequence>
-        <IsMatchRunning/>
-        <DecideTarget/>
-        <ReactiveFallback>
-          <TunnelCross/>
-          <NavCruise/>
-        </ReactiveFallback>
-      </ReactiveSequence>
-      <Standby/>
-    </ReactiveFallback>
+    <ReactiveSequence name="decision_tick">
+      <ReadInputs name="read_inputs" config="{config}" io="{io}" plan="{plan}" sense="{sense}"/>
+      <ReactiveFallback name="match_or_standby">
+        <ReactiveSequence name="active_match">
+          <MatchRunning name="match_running" sense="{sense}"/>
+          <BeginMatch name="begin_match" config="{config}" io="{io}" plan="{plan}" execution="{execution}"/>
+          <UpdateHomeLatch name="update_home_latch" config="{config}" sense="{sense}" plan="{plan}"/>
+          <ObserveOperator name="observe_operator" io="{io}" plan="{plan}" execution="{execution}" sense="{sense}"/>
+          <ForceSuccess name="purchases_best_effort">
+            <Sequence name="automatic_purchases">
+              <AutoBuyEnabled name="auto_buy_enabled" config="{config}"/>
+              <ForceSuccess name="ammo_purchase_best_effort">
+                <Sequence name="purchase_ammo_if_due">
+                  <AmmoPurchaseDue name="ammo_purchase_due" config="{config}" io="{io}" sense="{sense}" plan="{plan}"/>
+                  <BuyAmmo name="buy_ammo" config="{config}" io="{io}" plan="{plan}"/>
+                </Sequence>
+              </ForceSuccess>
+              <ForceSuccess name="hp_purchase_best_effort">
+                <Sequence name="purchase_hp_if_due">
+                  <HpPurchaseDue name="hp_purchase_due" config="{config}" io="{io}" sense="{sense}" plan="{plan}"/>
+                  <BuyHp name="buy_hp" config="{config}" io="{io}" plan="{plan}"/>
+                </Sequence>
+              </ForceSuccess>
+              <ForceSuccess name="revive_purchase_best_effort">
+                <Sequence name="purchase_revive_if_due">
+                  <RevivePurchaseDue name="revive_purchase_due" config="{config}" io="{io}" sense="{sense}"
+                    plan="{plan}"/>
+                  <Fallback name="free_or_paid_revive">
+                    <FreeReviveAllowed name="free_revive_allowed" sense="{sense}"/>
+                    <PaidReviveAllowed name="paid_revive_allowed" sense="{sense}"/>
+                  </Fallback>
+                  <BuyRevive name="buy_revive" config="{config}" io="{io}" plan="{plan}"/>
+                </Sequence>
+              </ForceSuccess>
+            </Sequence>
+          </ForceSuccess>
+          <Fallback name="target_priority">
+            <Sequence name="operator_task">
+              <HasOperatorTarget name="has_operator_task" plan="{plan}"/>
+              <Fallback name="release_or_keep_operator_target">
+                <ForceFailure name="continue_after_operator_release">
+                  <Sequence name="release_operator_if_ready">
+                    <OperatorHoldElapsed name="operator_hold_elapsed" config="{config}" io="{io}" plan="{plan}"/>
+                    <Fallback name="operator_release_reason">
+                      <HomeLatched name="home_requires_operator_release" plan="{plan}"/>
+                      <OperatorClearElapsed name="operator_clear_elapsed" config="{config}" io="{io}" plan="{plan}"/>
+                    </Fallback>
+                    <ConsumeOperator name="consume_operator" plan="{plan}"/>
+                  </Sequence>
+                </ForceFailure>
+                <Sequence name="keep_operator_target">
+                  <HasOperatorTarget name="operator_task_still_active" plan="{plan}"/>
+                  <SelectOperator name="select_operator" io="{io}" plan="{plan}" target="{target}"/>
+                </Sequence>
+              </Fallback>
+            </Sequence>
+            <Sequence name="home_supply_priority">
+              <HomeLatched name="home_supply_latched" plan="{plan}"/>
+              <SelectHome name="select_home" config="{config}" io="{io}" plan="{plan}" target="{target}"/>
+            </Sequence>
+            <Sequence name="retake_own_outpost_priority">
+              <OwnOutpostNeeds name="own_outpost_needs" config="{config}" sense="{sense}"/>
+              <SelectRetake name="select_retake" config="{config}" io="{io}" plan="{plan}" target="{target}"/>
+            </Sequence>
+            <Sequence name="attack_enemy_outpost_priority">
+              <EnemyOutpostNeeds name="enemy_outpost_needs" config="{config}" sense="{sense}"/>
+              <SelectOutpost name="select_outpost" config="{config}" io="{io}" plan="{plan}" target="{target}"/>
+            </Sequence>
+            <SelectPatrol name="select_patrol" config="{config}" io="{io}" sense="{sense}" plan="{plan}"
+              execution="{execution}" target="{target}"/>
+          </Fallback>
+          <CommitTarget name="commit_target" config="{config}" io="{io}" plan="{plan}" target="{target}"/>
+          <ReactiveFallback name="execute_target_or_stop">
+            <ReactiveSequence name="execute_tunnel_route">
+              <NeedsTunnel name="needs_tunnel" config="{config}" plan="{plan}" execution="{execution}"
+                target="{target}"/>
+              <ReactiveFallback name="prepare_tunnel_or_stop">
+                <ReactiveSequence name="prepared_tunnel">
+                  <PrepareTunnel name="prepare_tunnel" config="{config}" io="{io}" sense="{sense}" plan="{plan}"
+                    execution="{execution}" target="{target}"/>
+                  <TunnelQuiet name="tunnel_quiet" io="{io}"/>
+                  <ReactiveFallback name="tunnel_execution_priority">
+                    <ReactiveSequence name="wait_tunnel_cooldown">
+                      <TunnelCooldown name="tunnel_cooldown" io="{io}" execution="{execution}"/>
+                      <WaitStopped name="stop_during_tunnel_cooldown" io="{io}" execution="{execution}"/>
+                    </ReactiveSequence>
+                    <ReactiveSequence name="finish_tunnel_exit">
+                      <TunnelExitReached name="tunnel_exit_reached" execution="{execution}"/>
+                      <ExplicitStop name="stop_at_tunnel_exit" io="{io}" execution="{execution}"/>
+                      <ReactiveFallback name="confirm_or_request_unfold">
+                        <Unfolded name="unfolded" io="{io}"/>
+                        <RequestUnfold name="request_unfold" config="{config}" io="{io}" sense="{sense}"
+                          execution="{execution}"/>
+                      </ReactiveFallback>
+                      <CompleteTunnel name="complete_tunnel" execution="{execution}"/>
+                    </ReactiveSequence>
+                    <ReactiveSequence name="fail_crossing_if_unfolded">
+                      <CrossingNavigationActive name="crossing_navigation_active" execution="{execution}"/>
+                      <Inverter name="fold_confirmation_lost">
+                        <Folded name="crossing_fold_confirmed" io="{io}"/>
+                      </Inverter>
+                      <FailTunnel name="fail_tunnel" config="{config}" io="{io}" sense="{sense}"
+                        execution="{execution}"/>
+                    </ReactiveSequence>
+                    <ReactiveSequence name="enter_fold_and_traverse">
+                      <ReactiveFallback name="committed_crossing_or_entry">
+                        <CrossingCommitted name="crossing_committed" execution="{execution}"/>
+                        <NavigateEntry name="navigate_entry" config="{config}" io="{io}" sense="{sense}"
+                          execution="{execution}"/>
+                      </ReactiveFallback>
+                      <ReactiveFallback name="confirm_or_request_fold">
+                        <Folded name="entry_fold_confirmed" io="{io}"/>
+                        <ReactiveSequence name="stop_before_fold_request">
+                          <ExplicitStop name="stop_before_folding" io="{io}" execution="{execution}"/>
+                          <RequestFold name="request_fold" config="{config}" io="{io}" sense="{sense}"
+                            execution="{execution}"/>
+                        </ReactiveSequence>
+                      </ReactiveFallback>
+                      <TraverseTunnel name="traverse_tunnel" config="{config}" io="{io}" sense="{sense}"
+                        plan="{plan}" execution="{execution}"/>
+                    </ReactiveSequence>
+                  </ReactiveFallback>
+                </ReactiveSequence>
+                <WaitStopped name="stop_when_tunnel_unavailable" io="{io}" execution="{execution}"/>
+              </ReactiveFallback>
+            </ReactiveSequence>
+            <ReactiveSequence name="execute_ordinary_target">
+              <HasTarget name="has_target" target="{target}"/>
+              <ReactiveFallback name="ordinary_navigation_priority">
+                <ReactiveSequence name="monitor_owned_navigation">
+                  <OwnsOrdinaryRequest name="owns_ordinary_request" execution="{execution}" target="{target}"/>
+                  <ReactiveFallback name="fail_or_keep_navigation">
+                    <ReactiveSequence name="handle_ordinary_failure">
+                      <OrdinaryFailed name="ordinary_failed" config="{config}" io="{io}" execution="{execution}"/>
+                      <FailOrdinary name="fail_ordinary" config="{config}" io="{io}" execution="{execution}"
+                        target="{target}"/>
+                    </ReactiveSequence>
+                    <TacticalKeep name="tactical_keep" config="{config}" io="{io}" execution="{execution}"
+                      target="{target}"/>
+                  </ReactiveFallback>
+                </ReactiveSequence>
+                <ReactiveSequence name="wait_ordinary_retry">
+                  <OrdinaryRetryBlocked name="ordinary_retry_blocked" io="{io}" execution="{execution}"
+                    target="{target}"/>
+                  <WaitStopped name="stop_during_ordinary_retry" io="{io}" execution="{execution}"/>
+                </ReactiveSequence>
+                <SubmitOrdinary name="submit_ordinary" config="{config}" io="{io}" execution="{execution}"
+                  target="{target}"/>
+              </ReactiveFallback>
+            </ReactiveSequence>
+            <WaitStopped name="stop_without_target" io="{io}" execution="{execution}"/>
+          </ReactiveFallback>
+        </ReactiveSequence>
+        <Standby name="standby" io="{io}" plan="{plan}" execution="{execution}" target="{target}"/>
+      </ReactiveFallback>
+    </ReactiveSequence>
   </BehaviorTree>
 </root>

@@ -18,12 +18,15 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(nav2_msgs REQUIRED)
+find_package(rclcpp_action REQUIRED)
 find_package(rm2027_interfaces REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
-# 纯逻辑库：决策树 + 过洞状态机 + 配置加载，不依赖 ROS，测试直接链接
+# 纯逻辑库：区域几何、选点和配置加载，不依赖 ROS。
 add_library(bbt_decide_core
+  src/geometry.cpp
   src/planner.cpp
   src/config.cpp)
 target_include_directories(bbt_decide_core PUBLIC
@@ -31,13 +34,15 @@ target_include_directories(bbt_decide_core PUBLIC
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(bbt_decide_core PUBLIC yaml-cpp)
 
-# 行为树节点：编排层，逻辑全在 bbt_decide_core 的纯函数里
+# 行为树节点：直接编排任务选择、导航、机构与失败恢复。
 add_library(bbt_decide_bt src/bt.cpp)
+target_compile_definitions(bbt_decide_bt PRIVATE
+  BBT_TREE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/trees/main.xml")
 target_link_libraries(bbt_decide_bt PUBLIC bbt_decide_core behaviortree_cpp::behaviortree_cpp)
 
 # ROS 适配层：抽象 Ports ↔ 真实话题（本包唯一数据进出口）
 add_library(bbt_decide_ros src/ros_ports.cpp)
-ament_target_dependencies(bbt_decide_ros rclcpp std_msgs geometry_msgs nav_msgs rm2027_interfaces)
+ament_target_dependencies(bbt_decide_ros rclcpp rclcpp_action std_msgs geometry_msgs nav_msgs nav2_msgs rm2027_interfaces)
 target_link_libraries(bbt_decide_ros bbt_decide_core)
 
 # 决策节点
@@ -57,19 +62,28 @@ if(BUILD_TESTING)
   enable_testing()
   # 纯逻辑测试：不需要 ROS 环境，直接跑（走廊洞/换点/多洞/死亡回血全在里面）
   add_executable(bbt_decide_tests test/planner_test.cpp)
-  target_link_libraries(bbt_decide_tests bbt_decide_core)
+  target_link_libraries(bbt_decide_tests bbt_decide_bt)
   add_test(NAME bbt_decide_planner_test COMMAND bbt_decide_tests)
 
-  # 行为树测试：用树驱动同一套走廊流程，证明"跑树"与"直接调纯函数"行为一致
+  # 行为树测试：通过生产XML和Ports验证任务、计时、过洞与恢复。
   add_executable(bbt_decide_bt_tests test/bt_test.cpp)
   target_compile_definitions(bbt_decide_bt_tests PRIVATE SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   target_link_libraries(bbt_decide_bt_tests bbt_decide_bt behaviortree_cpp::behaviortree_cpp)
   add_test(NAME bbt_decide_bt_test COMMAND bbt_decide_bt_tests)
 
+  add_executable(bbt_decide_blackboard_tests test/blackboard_test.cpp)
+  target_link_libraries(bbt_decide_blackboard_tests bbt_decide_bt)
+  add_test(NAME bbt_decide_blackboard_test COMMAND bbt_decide_blackboard_tests)
+
   add_executable(bbt_decide_regression_tests test/regression_test.cpp)
   target_compile_definitions(bbt_decide_regression_tests PRIVATE SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-  target_link_libraries(bbt_decide_regression_tests bbt_decide_core)
+  target_link_libraries(bbt_decide_regression_tests bbt_decide_bt)
   add_test(NAME bbt_decide_regression_test COMMAND bbt_decide_regression_tests)
+
+  add_executable(bbt_decide_geometry_tests test/geometry_test.cpp)
+  target_compile_definitions(bbt_decide_geometry_tests PRIVATE SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(bbt_decide_geometry_tests bbt_decide_core)
+  add_test(NAME bbt_decide_geometry_test COMMAND bbt_decide_geometry_tests)
 
   add_executable(bbt_decide_ros_tests test/ros_ports_test.cpp)
   target_link_libraries(bbt_decide_ros_tests bbt_decide_ros)
@@ -82,6 +96,12 @@ if(BUILD_TESTING)
   set_tests_properties(bbt_decide_node_test PROPERTIES TIMEOUT 20)
   add_test(NAME bbt_arena_adapter_test COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/arena/test_support.py)
+  add_test(NAME bbt_arena_navigation_test COMMAND ${Python3_EXECUTABLE} -m unittest
+    tools.arena.test_bridge tools.test_check_tunnel_suite tools.test_bbt_demo
+    tools.test_tunnel_runner tools.test_acceptance_provenance tools.test_analyze_bbt_run
+    tools.test_align_map)
+  set_tests_properties(bbt_arena_navigation_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../.." TIMEOUT 30)
 endif()
 
 ament_package()

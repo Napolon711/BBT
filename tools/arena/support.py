@@ -4,6 +4,13 @@ Geometry/navigation/replay only; decisions stay in the production BBT process.
 import math
 import json
 from pathlib import Path
+
+try:
+    from .navigation_constraints import bumps_clearance, sentry_routing_map
+    from .nav_plan import remaining_route
+except ImportError:  # Direct execution of adapter tools and offline tests.
+    from navigation_constraints import bumps_clearance, sentry_routing_map
+    from nav_plan import remaining_route
 FIELD_W=28.0
 FIELD_H=15.0
 sdk=None
@@ -37,8 +44,17 @@ class TunnelMonitor:
     def __init__(self, tunnels):
         self.tunnels = []
         self.alignments = []
+        self.corridors = []
         for t in tunnels or []:
             self.alignments.extend(tuple(a["p"]) for a in t.get("align", []))
+            center=t.get('center');align=t.get('align',[])
+            if center is not None and len(align)==2:
+                a,b=(tuple(item['p']) for item in align)
+                length=math.dist(a,b)
+                if length>1e-6:
+                    self.alignments.append(tuple(center))
+                    self.corridors.append((t.get('name','?'),a,tuple(center),b,
+                                           tuple((b[i]-a[i])/length for i in range(2)),length))
             c = t.get("corners") or []
             if len(c) < 3:
                 continue
@@ -75,6 +91,22 @@ class TunnelMonitor:
         返回：要穿的隧道名；不需要穿洞时返回 None。
         副作用：无。
         """
+        # The entry is a topic goal; configured centre/exit poses share one
+        # tunnel action. Only corridor waypoints authorize a straight leg;
+        # being folded by itself never changes ordinary navigation into a line.
+        for name,a,center,b,axis,length in self.corridors:
+            lateral=(-axis[1],axis[0])
+            along=lambda p:sum((p[i]-a[i])*axis[i] for i in range(2))
+            cross=lambda p:abs(sum((p[i]-a[i])*lateral[i] for i in range(2)))
+            current=(px,py);goal=(gx,gy)
+            p=along(current);c=along(center)
+            if cross(current)>lat or not -tol<=p<=length+tol:
+                continue
+            center_goal=math.dist(goal,center)<.01
+            exit_goal=math.dist(goal,b)<.01 and p>=c-tol
+            reverse_exit=math.dist(goal,a)<.01 and p<=c+tol
+            if center_goal or exit_goal or reverse_exit:
+                return name
         for name, x0, x1, y0, y1 in self.tunnels:
             if not (x0 - reach <= px <= x1 + reach and y0 - reach <= py <= y1 + reach
                     and x0 - reach <= gx <= x1 + reach and y0 - reach <= gy <= y1 + reach):
@@ -143,7 +175,7 @@ class NavController:
     副作用：内部维护 state（0 idle / 1 running / 2 success / 3 failure）。
     """
 
-    def __init__(self, fmap, arrive_m=0.35, max_speed=4.0):
+    def __init__(self, fmap, arrive_m=0.08, max_speed=2.9):
         self.fmap = fmap
         self.arrive_m = arrive_m
         self.max_speed = max_speed
@@ -152,50 +184,155 @@ class NavController:
         self.straight = False
         self.goal_key = None
         self.precise = False
+        self.routing_source = None
+        self.routing_arena = None
+        self.plan_arena = []
+        self.corridor = None
+        self.lateral_integral=0.
+        self.longitudinal_integral=0.
+        self.last_failure = None
+
+    def prepare(self, arena, robot):
+        if self.routing_source is not arena:
+            self.routing_source = arena
+            self.routing_arena = sentry_routing_map(arena)
+            prepare=getattr(sdk,"_prepare_chapter4",None)
+            if prepare is not None:
+                # Warm both envelopes before live ROS freshness timers start.
+                prepare(self.routing_arena,robot["team"],True)
+                prepare(self.routing_arena,robot["team"],False)
+
+    def plan(self, goal_field, robot, arena):
+        """Return the complete ordinary route in Arena coordinates, or [].
+
+        These obstacle vertices are internal to the simulator's navigation
+        substitute. They do not create BBT goals or require intermediate stops.
+        """
+        self.prepare(arena,robot)
+        if goal_field is None:
+            return []
+        goal=self.fmap.to_arena_xy(*goal_field)
+        radius=max(.47,float(robot.get('radius',.42)))
+        if bumps_clearance(arena,goal,radius=radius)<=.01:
+            return []
+        return remaining_route(sdk,robot,goal,self.routing_arena,radius)
 
     def update(self, goal_field, pose_field, robot, arena, straight=False,
-               precise=False, revision=0):
+               precise=False, revision=0, corridor=None):
         """Navigation goal owns its path until completion/cancel; never replan out of a tunnel.
 
-        Alignment goals require <=8 cm position error and <=0.12 m/s actual speed.
+        Alignment goals require <=2.5 cm position error and <=0.12 m/s actual speed.
         Success remains latched for that goal; a new ROS goal/cancel resets it.
         """
+        if self.state!=3:
+            self.last_failure = None
         key = (tuple(goal_field) if goal_field is not None else None, revision)
         if key != self.goal_key:
             self.goal_key = key
             self.state = 0
+            self.last_failure = None
             self.straight = bool(straight)
             self.precise = bool(precise)
+            self.corridor=corridor
+            self.lateral_integral=0.
+            self.longitudinal_integral=0.
         if goal_field is None:
             self.state = 0
             self.goal_arena = None
+            self.plan_arena = []
             self.straight = False
             return (0.0, 0.0)
         self.goal_arena = self.fmap.to_arena_xy(*goal_field)
+        self.prepare(arena,robot)
+        radius=max(.47,float(robot.get('radius',.42)))
+        start=(robot["x"],robot["y"])
+        self.plan_arena=[start,self.goal_arena]
+        if bumps_clearance(arena,self.goal_arena,radius=radius)<=.01:
+            self.state=3  # A discrete point never authorizes forbidden terrain.
+            self.last_failure = 'goal_footprint_overlaps_bumps'
+            return (0.,0.)
         if self.state == 2:
             return (0.0, 0.0)
-        gx, gy = goal_field
-        px, py = pose_field
-        distance = math.hypot(gx-px, gy-py)
-        tolerance = 0.08 if self.precise else self.arrive_m
+        distance = math.dist(start,self.goal_arena)
+        tolerance = 0.025 if self.precise else self.arrive_m
         measured_speed = math.hypot(robot['vx'],robot['vy'])
+        cross_error=0.;axis=None
+        if self.corridor is not None:
+            _,origin,_,_,field_axis,_=self.corridor
+            axis=self.fmap.to_arena_vec(*field_axis)
+            origin=self.fmap.to_arena_xy(*origin)
+            lateral=(-axis[1],axis[0])
+            cross_error=sum((start[i]-origin[i])*lateral[i] for i in range(2))
         self.state = 1
-        if distance <= tolerance:
+        if distance <= tolerance and (axis is None or abs(cross_error)<=.02):
             if measured_speed <= .12:
                 self.state = 2
             return (0.0, 0.0)
-        if self.straight or (self.precise and distance < .45):
+        sdk_speed = self.max_speed
+        if axis is not None and (self.straight or (self.precise and distance<.45)):
+            # The configured corridor axis is fixed. Correct lateral error
+            # independently of distance to the intermediate centre goal; a
+            # diagonal chord from a 5 cm entrance residual can scrape a roof.
+            lateral=(-axis[1],axis[0])
+            along=sum((self.goal_arena[i]-start[i])*axis[i] for i in range(2))
+            forward=max(-.8,min(.8,1.2*along))
+            if abs(along)>.015:forward=math.copysign(max(.2,abs(forward)),along)
+            # Close the velocity loop on the exported physical speed. The new
+            # road portal is a ramp: a proportional position command alone can
+            # balance gravity before the centre target and stall indefinitely.
+            measured_forward=robot['vx']*axis[0]+robot['vy']*axis[1]
+            self.longitudinal_integral=max(-.65,min(.65,
+                self.longitudinal_integral+.1*(forward-measured_forward)))
+            forward=max(-.8,min(.8,forward+self.longitudinal_integral))
+            measured_lateral=robot['vx']*lateral[0]+robot['vy']*lateral[1]
+            if abs(cross_error)>.02:
+                self.lateral_integral=max(-.2,min(.2,self.lateral_integral+.1*cross_error))
+            else:self.lateral_integral=0.
+            lateral_speed=max(-.5,min(.5,-4.*cross_error-2.*self.lateral_integral-1.5*measured_lateral))
+            if abs(cross_error)>.02:
+                # Alignment is completed before advancing under a narrow roof.
+                forward=0.
+                self.longitudinal_integral=0.
+                if abs(measured_lateral)<.05:
+                    lateral_speed=math.copysign(max(.22,abs(lateral_speed)),-cross_error)
+            velocity=tuple(axis[i]*forward+lateral[i]*lateral_speed for i in range(2))
+            magnitude=math.hypot(*velocity)
+            if magnitude>.8:velocity=tuple(v*.8/magnitude for v in velocity)
+            end=tuple(start[i]+velocity[i]*.3 for i in range(2))
+            if bumps_clearance(arena,start,end,radius+.02)<=0:
+                self.state=3
+                self.last_failure = 'corridor_velocity_sweeps_bumps'
+                return (0.,0.)
+            return velocity
+        if self.precise and distance < .45:
             # Near an alignment point, correct the final residual directly;
             # SDK's obstacle margin must not push the target off the tunnel axis.
             dx, dy = self.goal_arena[0]-robot['x'], self.goal_arena[1]-robot['y']
             length = math.hypot(dx,dy)
             ux, uy = dx/length, dy/length
         else:
-            ux,uy = sdk.navigate(robot,self.goal_arena,arena)
+            self.plan_arena=self.plan(goal_field,robot,arena)
+            if len(self.plan_arena)<2:
+                self.state=3
+                self.last_failure = 'no_ordinary_route'
+                return (0.,0.)
+            waypoint=self.plan_arena[1]
+            dx,dy=waypoint[0]-robot['x'],waypoint[1]-robot['y']
+            magnitude=math.hypot(dx,dy)
+            ux,uy=(dx/magnitude,dy/magnitude) if magnitude>1e-9 else (0.,0.)
+            sdk_speed=min(self.max_speed,2.*magnitude)
         # Lower speed inside the narrow corridor; stopping precision is measured.
         limit = .8 if self.straight else self.max_speed
-        speed = min(limit, 1.2*distance)
-        return (ux*speed,uy*speed)
+        speed = min(limit, sdk_speed, 1.2*distance)
+        velocity=(ux*speed,uy*speed)
+        start=(robot['x'],robot['y'])
+        # Look ahead beyond the 10 Hz command hold, including braking margin.
+        end=(start[0]+velocity[0]*.3,start[1]+velocity[1]*.3)
+        if bumps_clearance(arena,start,end,radius+.02)<=0:
+            self.state=3
+            self.last_failure = 'ordinary_velocity_sweeps_bumps'
+            return (0.,0.)
+        return velocity
 
 class EngineFoldReport:
     """把 Arena 的**真实机构状态**翻成决策层要的折叠码。

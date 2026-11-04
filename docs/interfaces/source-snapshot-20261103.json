@@ -1,0 +1,451 @@
+{
+  "audit_date_local": "2026-11-03",
+  "timezone": "Asia/Shanghai",
+  "bbt_head": "10e09107fc64640c8df1eb3409cf446bd230477a",
+  "baselines": {
+    "54f3dd7": "54f3dd7e67c642b2feb597a217460ae60f04fe86",
+    "ae7bafd": "ae7bafd6d6482d13280b2a672d09688ce58ec3ea",
+    "099b67a": "099b67a9452d5ca5d42f7538d94c08bf4a9a47bb"
+  },
+  "scope": "Code and recorded human requirements; no hardware or live external navigation verified",
+  "bbt_files": {
+    "src/bbt_decide/src/ros_ports.cpp": "733b9166e9017789908654c08002aa36123be6ed900e6e42711ba269d4462bd6",
+    "src/bbt_decide/src/main.cpp": "d406832ea236d110e57dbd3e4a9f9149d28e66a2dac0239dadac2b8d040bb61c",
+    "src/bbt_decide/config/decision.yaml": "245f29da4089f80365d515dd672496ebb782a7e86f04a4e9922d6cee4eb68c71",
+    "src/ros2_libxr/src/bridge_node.cpp": "8de9a1a2716751285b93c213b76e8cee07e3cf22d26b08f5ba02c27fc64f987f",
+    "src/ros2_libxr/include/ros2_libxr/shared_topic.hpp": "3643c187e7fb5d88068a12a5c3f3848195b646b16228e6e29d89604768b06d89",
+    "src/ros2_libxr/src/shared_topic.cpp": "bdd7f3c922992592101734bc63c17d482cc3a465848dc96eff169e736ea4be90",
+    "src/ros2_libxr/src/referee_2027.cpp": "563f6750339b3bb653b3908fe72a91053b3fc40f50b527a0c1c06f09400d9da2"
+  },
+  "reference_uc_path": "/home/chengdong/27BT-UC",
+  "reference_uc_has_git": false,
+  "reference_files": {
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/ChassisState.msg": "6bf2e2ca24adf22cbf22441a1543afff39820b55c5a340431623ce8e2d5becc2",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/DecisionInput.msg": "20667879f059f879d9a6e6f296617fefcf435021bafa34283460f08928dd8087",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/FieldEvent.msg": "91f4fe31b262a3064de2d7e8582cdf1db98674fd3301cf14a44d4b6457651c96",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/GameResult.msg": "d5591800d7302b60776db2de612799386635665f121675b564ea8b089cba14a0",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/GameStatus.msg": "18faa607980c170775909f99c15c1f7afad867ccd99d1352f4dd052f6a8104e1",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/GroundRobotPosition.msg": "3ab388129eb46c3f25942a01d8d3626b7d5f26cb9ec10f168a2199084dcd3bf3",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/PowerHeat.msg": "eaa93ba9ed745206c3f8cbc1d759fcd696620c551752fec18f4a2797b641b138",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/ProjectileAllowance.msg": "d6bd1e9a8940d191d7a32ed3428710e79aced81e9038299dc18b6a86697ebd87",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/RefereeFrame.msg": "b73ccce196bfc9ba41d20b37490711a55b5a05f970c37c4e0022a2fe329e39af",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/RefereeTx.msg": "34c2b011691556cd5750a6c56e5daba00622f7eb12cdcb0d7a29e909860f6d28",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/RefereeWarning.msg": "43821fcfd8a6ce0fc43377bc417fdbcd635c114c000b0689402aac58840c5f78",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/RfidStatus.msg": "b4e876e16e6aee11f0ec014750e848ba4e87421d2be47873efe2b8b706b9c7ae",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/RobotBuff.msg": "e954406e39cb3044226ac355761a062433dfb35b22b6a978683033488dbba467",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/RobotDamage.msg": "451a82865894d9be9b9c16933288a92c6cae9bb84eedf6720a40583633b0346b",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/RobotHP.msg": "0376c3eb73307ce870275e5d1fe6f0061d75aa748823a48dcb7b246a6be37d71",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/RobotPosition.msg": "d2b451f2eed64f1b3fb51c9df694906fd9d24420378f1b22a72943f09a6ee15f",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/RobotStatus.msg": "d647bc1b978212695b28b5ab631109c21b87974c385a497f9797b40789ab55bc",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/SentryCommand.msg": "6595087c2b6996679a33b23936d0f42d3ff3b797ef9508b769b19397732d2171",
+    "/home/chengdong/27BT-UC/src/rm2027_interfaces/msg/SentryInfo.msg": "97e0736471a0aba0840a00d728e28f8dfc2608106c4e37c8f418719b1d402cb7",
+    "/home/chengdong/27BT-UC/src/sentry_decide/src/ports_adapter.cpp": "bca3884c1ab697a65f33b8717f0b6b235b1a7aa9fb48c43ed243cf9e3e334580",
+    "/home/chengdong/27BT-UC/src/sentry_decide/include/sentry_decide/ports_adapter.hpp": "1170f3f7d82e0e5fdb7d4a1e7650cb399602aa382bf68ee8f25dbc896fe711ea",
+    "/home/chengdong/27BT-UC/src/ros2_libxr/src/bridge_node.cpp": "6426374d077ddaaeea9d8582579b204b7de347e51403cc54e00cca073222a7e5",
+    "/home/chengdong/27BT-UC/src/ros2_libxr/include/ros2_libxr/shared_topic.hpp": "3643c187e7fb5d88068a12a5c3f3848195b646b16228e6e29d89604768b06d89",
+    "/home/chengdong/27BT-UC/src/ros2_libxr/src/shared_topic.cpp": "bdd7f3c922992592101734bc63c17d482cc3a465848dc96eff169e736ea4be90",
+    "/home/chengdong/27BT-UC/src/ros2_libxr/src/referee_2027.cpp": "563f6750339b3bb653b3908fe72a91053b3fc40f50b527a0c1c06f09400d9da2"
+  },
+  "message_definitions": {
+    "ChassisState": {
+      "path": "src/rm2027_interfaces/msg/ChassisState.msg",
+      "sha256": "6bf2e2ca24adf22cbf22441a1543afff39820b55c5a340431623ce8e2d5becc2",
+      "fields": [
+        "std_msgs/Header header",
+        "float32 vx",
+        "float32 vy",
+        "float32 wz",
+        "uint8 fold_state",
+        "uint8 posture",
+        "uint16 buffer_energy_j",
+        "uint16 power_w",
+        "uint32 tick_ms"
+      ],
+      "reference_sha256": "6bf2e2ca24adf22cbf22441a1543afff39820b55c5a340431623ce8e2d5becc2",
+      "field_compatible": true
+    },
+    "DecisionInput": {
+      "path": "src/rm2027_interfaces/msg/DecisionInput.msg",
+      "sha256": "20667879f059f879d9a6e6f296617fefcf435021bafa34283460f08928dd8087",
+      "fields": [
+        "std_msgs/Header header",
+        "uint32 sequence",
+        "string schema_hash",
+        "float64[] observation",
+        "int32[] mask"
+      ],
+      "reference_sha256": "20667879f059f879d9a6e6f296617fefcf435021bafa34283460f08928dd8087",
+      "field_compatible": true
+    },
+    "FieldEvent": {
+      "path": "src/rm2027_interfaces/msg/FieldEvent.msg",
+      "sha256": "91f4fe31b262a3064de2d7e8582cdf1db98674fd3301cf14a44d4b6457651c96",
+      "fields": [
+        "std_msgs/Header header",
+        "uint32 event_data",
+        "uint32 event_data_2",
+        "uint8 supply_zone_active",
+        "uint8 small_energy_state",
+        "uint8 big_energy_state",
+        "uint8 fortress_r_state",
+        "uint8 fortress_b_state",
+        "uint8 base_gain_r_state",
+        "uint8 base_gain_b_state",
+        "bool own_highland_gain",
+        "uint8 central_highland_r_state",
+        "uint8 central_highland_b_state",
+        "uint8 outpost_gain_r_state",
+        "uint8 outpost_gain_b_state",
+        "uint8 outpost_r_control",
+        "uint8 outpost_b_control",
+        "uint8 base_r_control",
+        "uint8 base_b_control",
+        "uint16 enemy_dart_last_hit_time_s",
+        "uint8 enemy_dart_last_hit_target",
+        "uint8 rmul_r_highland_activate",
+        "uint8 rmul_r_highland_control",
+        "uint8 rmul_b_highland_activate",
+        "uint8 rmul_b_highland_control",
+        "uint8 rmul_center_activate",
+        "uint8 rmul_center_control"
+      ],
+      "reference_sha256": "91f4fe31b262a3064de2d7e8582cdf1db98674fd3301cf14a44d4b6457651c96",
+      "field_compatible": true
+    },
+    "GameResult": {
+      "path": "src/rm2027_interfaces/msg/GameResult.msg",
+      "sha256": "d5591800d7302b60776db2de612799386635665f121675b564ea8b089cba14a0",
+      "fields": [
+        "std_msgs/Header header",
+        "uint8 winner"
+      ],
+      "reference_sha256": "d5591800d7302b60776db2de612799386635665f121675b564ea8b089cba14a0",
+      "field_compatible": true
+    },
+    "GameStatus": {
+      "path": "src/rm2027_interfaces/msg/GameStatus.msg",
+      "sha256": "18faa607980c170775909f99c15c1f7afad867ccd99d1352f4dd052f6a8104e1",
+      "fields": [
+        "std_msgs/Header header",
+        "uint8 GAME_TYPE_RMUL = 1",
+        "uint8 GAME_TYPE_RMUC = 2",
+        "uint8 GAME_TYPE_RMUT = 3",
+        "uint8 GAME_TYPE_RMUA = 4",
+        "uint8 GAME_TYPE_RMUL_3V3 = 5",
+        "uint8 GAME_TYPE_RMUL_1V1 = 6",
+        "uint8 PROGRESS_NOT_START = 0",
+        "uint8 PROGRESS_PREPARATION = 1",
+        "uint8 PROGRESS_SELF_CHECKING = 2",
+        "uint8 PROGRESS_COUNT_DOWN = 3",
+        "uint8 PROGRESS_RUNNING = 4",
+        "uint8 PROGRESS_GAME_OVER = 5",
+        "uint8 game_type",
+        "uint8 game_progress",
+        "uint16 stage_remain_time",
+        "uint64 sync_time_stamp"
+      ],
+      "reference_sha256": "18faa607980c170775909f99c15c1f7afad867ccd99d1352f4dd052f6a8104e1",
+      "field_compatible": true
+    },
+    "GroundRobotPosition": {
+      "path": "src/rm2027_interfaces/msg/GroundRobotPosition.msg",
+      "sha256": "3ab388129eb46c3f25942a01d8d3626b7d5f26cb9ec10f168a2199084dcd3bf3",
+      "fields": [
+        "std_msgs/Header header",
+        "geometry_msgs/Point heavy_engineer",
+        "geometry_msgs/Point standard_3",
+        "geometry_msgs/Point standard_4",
+        "bool valid"
+      ],
+      "reference_sha256": "3ab388129eb46c3f25942a01d8d3626b7d5f26cb9ec10f168a2199084dcd3bf3",
+      "field_compatible": true
+    },
+    "PowerHeat": {
+      "path": "src/rm2027_interfaces/msg/PowerHeat.msg",
+      "sha256": "eaa93ba9ed745206c3f8cbc1d759fcd696620c551752fec18f4a2797b641b138",
+      "fields": [
+        "std_msgs/Header header",
+        "uint16 buffer_energy",
+        "uint16 shooter_17mm_heat",
+        "uint16 shooter_42mm_heat"
+      ],
+      "reference_sha256": "eaa93ba9ed745206c3f8cbc1d759fcd696620c551752fec18f4a2797b641b138",
+      "field_compatible": true
+    },
+    "ProjectileAllowance": {
+      "path": "src/rm2027_interfaces/msg/ProjectileAllowance.msg",
+      "sha256": "d6bd1e9a8940d191d7a32ed3428710e79aced81e9038299dc18b6a86697ebd87",
+      "fields": [
+        "std_msgs/Header header",
+        "uint16 projectile_allowance_17mm",
+        "uint16 projectile_allowance_42mm",
+        "uint16 remaining_gold_coin",
+        "uint16 projectile_allowance_fortress"
+      ],
+      "reference_sha256": "d6bd1e9a8940d191d7a32ed3428710e79aced81e9038299dc18b6a86697ebd87",
+      "field_compatible": true
+    },
+    "RefereeFrame": {
+      "path": "src/rm2027_interfaces/msg/RefereeFrame.msg",
+      "sha256": "c8755e7229ed25078b828fcd160aef7710336c8d5e227a4ab569f1ae9255ca9c",
+      "fields": [
+        "std_msgs/Header header",
+        "uint8 BUS_MAIN = 0",
+        "uint8 BUS_VIDEO = 1",
+        "uint8 bus",
+        "uint8 seq",
+        "uint32 tick_ms",
+        "uint16 len",
+        "uint16 cmd_id",
+        "uint8[] raw"
+      ],
+      "reference_sha256": "b73ccce196bfc9ba41d20b37490711a55b5a05f970c37c4e0022a2fe329e39af",
+      "field_compatible": true
+    },
+    "RefereeTx": {
+      "path": "src/rm2027_interfaces/msg/RefereeTx.msg",
+      "sha256": "34c2b011691556cd5750a6c56e5daba00622f7eb12cdcb0d7a29e909860f6d28",
+      "fields": [
+        "std_msgs/Header header",
+        "uint8 BUS_MAIN = 0",
+        "uint8 BUS_VIDEO = 1",
+        "uint16 cmd_id",
+        "uint8 bus",
+        "uint8[] data"
+      ],
+      "reference_sha256": "34c2b011691556cd5750a6c56e5daba00622f7eb12cdcb0d7a29e909860f6d28",
+      "field_compatible": true
+    },
+    "RefereeWarning": {
+      "path": "src/rm2027_interfaces/msg/RefereeWarning.msg",
+      "sha256": "43821fcfd8a6ce0fc43377bc417fdbcd635c114c000b0689402aac58840c5f78",
+      "fields": [
+        "std_msgs/Header header",
+        "uint8 level",
+        "uint8 offending_robot_id",
+        "uint8 count"
+      ],
+      "reference_sha256": "43821fcfd8a6ce0fc43377bc417fdbcd635c114c000b0689402aac58840c5f78",
+      "field_compatible": true
+    },
+    "RfidStatus": {
+      "path": "src/rm2027_interfaces/msg/RfidStatus.msg",
+      "sha256": "b4e876e16e6aee11f0ec014750e848ba4e87421d2be47873efe2b8b706b9c7ae",
+      "fields": [
+        "std_msgs/Header header",
+        "uint32 rfid_status",
+        "uint16 rfid_status_2",
+        "bool supply_zone_own",
+        "bool assembly_own",
+        "bool base_gain_r",
+        "bool base_gain_b",
+        "bool fortress_r",
+        "bool fortress_b",
+        "bool central_highland_r",
+        "bool central_highland_b",
+        "bool outpost_r",
+        "bool outpost_b",
+        "bool highland_own",
+        "bool rmul_r_highland",
+        "bool rmul_b_highland",
+        "bool rmul_center",
+        "bool terrain_cross_own_center_down",
+        "bool terrain_cross_own_center_up",
+        "bool terrain_cross_enemy_center_down",
+        "bool terrain_cross_enemy_center_up",
+        "bool terrain_cross_own_highway_down",
+        "bool terrain_cross_own_highway_up",
+        "bool terrain_cross_enemy_highway_down",
+        "bool terrain_cross_enemy_highway_up",
+        "bool tunnel_own_highway_down",
+        "bool tunnel_own_highway_mid",
+        "bool tunnel_own_highway_up",
+        "bool tunnel_near_own_trapezoid_low",
+        "bool tunnel_near_own_trapezoid_mid",
+        "bool tunnel_near_own_trapezoid_high",
+        "bool tunnel_far_own_trapezoid_far",
+        "bool tunnel_far_own_trapezoid_mid",
+        "bool tunnel_far_own_trapezoid_near",
+        "bool tunnel_enemy_highway_down",
+        "bool tunnel_enemy_highway_mid",
+        "bool tunnel_enemy_highway_up",
+        "bool tunnel_near_enemy_trapezoid_low",
+        "bool tunnel_near_enemy_trapezoid_mid",
+        "bool tunnel_near_enemy_trapezoid_high",
+        "bool tunnel_far_enemy_trapezoid_far",
+        "bool tunnel_far_enemy_trapezoid_mid",
+        "bool tunnel_far_enemy_trapezoid_near"
+      ],
+      "reference_sha256": "b4e876e16e6aee11f0ec014750e848ba4e87421d2be47873efe2b8b706b9c7ae",
+      "field_compatible": true
+    },
+    "RobotBuff": {
+      "path": "src/rm2027_interfaces/msg/RobotBuff.msg",
+      "sha256": "e954406e39cb3044226ac355761a062433dfb35b22b6a978683033488dbba467",
+      "fields": [
+        "std_msgs/Header header",
+        "uint8 recovery_buff",
+        "uint16 cooling_buff",
+        "uint8 defence_buff",
+        "uint8 vulnerability_buff",
+        "uint16 attack_buff"
+      ],
+      "reference_sha256": "e954406e39cb3044226ac355761a062433dfb35b22b6a978683033488dbba467",
+      "field_compatible": true
+    },
+    "RobotDamage": {
+      "path": "src/rm2027_interfaces/msg/RobotDamage.msg",
+      "sha256": "451a82865894d9be9b9c16933288a92c6cae9bb84eedf6720a40583633b0346b",
+      "fields": [
+        "std_msgs/Header header",
+        "uint8 armor_id",
+        "uint8 hp_deduction_reason",
+        "uint16 hit_sequence",
+        "int16 hit_position_x",
+        "int16 hit_position_y"
+      ],
+      "reference_sha256": "451a82865894d9be9b9c16933288a92c6cae9bb84eedf6720a40583633b0346b",
+      "field_compatible": true
+    },
+    "RobotHP": {
+      "path": "src/rm2027_interfaces/msg/RobotHP.msg",
+      "sha256": "0376c3eb73307ce870275e5d1fe6f0061d75aa748823a48dcb7b246a6be37d71",
+      "fields": [
+        "std_msgs/Header header",
+        "uint16 ally_1_robot_hp",
+        "uint16 reserved",
+        "uint16 ally_3_robot_hp",
+        "uint16 ally_4_robot_hp",
+        "int16 damage_difference",
+        "uint16 ally_7_robot_hp",
+        "uint16 outpost_r_hp",
+        "uint16 ally_base_hp",
+        "uint16 outpost_b_hp",
+        "uint16 enemy_base_hp",
+        "uint16 ally_control_degree",
+        "uint16 enemy_control_degree"
+      ],
+      "reference_sha256": "0376c3eb73307ce870275e5d1fe6f0061d75aa748823a48dcb7b246a6be37d71",
+      "field_compatible": true
+    },
+    "RobotPosition": {
+      "path": "src/rm2027_interfaces/msg/RobotPosition.msg",
+      "sha256": "d2b451f2eed64f1b3fb51c9df694906fd9d24420378f1b22a72943f09a6ee15f",
+      "fields": [
+        "std_msgs/Header header",
+        "float32 x",
+        "float32 y",
+        "float32 angle"
+      ],
+      "reference_sha256": "d2b451f2eed64f1b3fb51c9df694906fd9d24420378f1b22a72943f09a6ee15f",
+      "field_compatible": true
+    },
+    "RobotStatus": {
+      "path": "src/rm2027_interfaces/msg/RobotStatus.msg",
+      "sha256": "d647bc1b978212695b28b5ab631109c21b87974c385a497f9797b40789ab55bc",
+      "fields": [
+        "std_msgs/Header header",
+        "uint8 robot_id",
+        "uint8 robot_level",
+        "uint16 current_hp",
+        "uint16 maximum_hp",
+        "uint16 shooter_barrel_cooling_value",
+        "uint16 shooter_barrel_heat_limit",
+        "uint16 chassis_power_limit",
+        "float32 shooter_initial_speed",
+        "bool power_gimbal_output",
+        "bool power_chassis_output",
+        "bool power_launcher_output"
+      ],
+      "reference_sha256": "d647bc1b978212695b28b5ab631109c21b87974c385a497f9797b40789ab55bc",
+      "field_compatible": true
+    },
+    "SentryCommand": {
+      "path": "src/rm2027_interfaces/msg/SentryCommand.msg",
+      "sha256": "6595087c2b6996679a33b23936d0f42d3ff3b797ef9508b769b19397732d2171",
+      "fields": [
+        "std_msgs/Header header",
+        "bool confirm_respawn",
+        "bool confirm_buy_respawn",
+        "uint16 exchange_allowance_total",
+        "uint8 remote_allowance_times",
+        "uint8 remote_hp_times",
+        "uint8 posture",
+        "bool activate_energy_mechanism"
+      ],
+      "reference_sha256": "6595087c2b6996679a33b23936d0f42d3ff3b797ef9508b769b19397732d2171",
+      "field_compatible": true
+    },
+    "SentryInfo": {
+      "path": "src/rm2027_interfaces/msg/SentryInfo.msg",
+      "sha256": "97e0736471a0aba0840a00d728e28f8dfc2608106c4e37c8f418719b1d402cb7",
+      "fields": [
+        "std_msgs/Header header",
+        "uint32 sentry_info",
+        "uint16 sentry_info_2",
+        "uint64 sentry_info_3",
+        "uint16 exchanged_projectile_allowance",
+        "uint8 remote_allowance_exchange_times",
+        "uint8 remote_hp_exchange_times",
+        "bool can_free_respawn",
+        "bool can_buy_respawn",
+        "uint16 respawn_cost_coin",
+        "bool out_of_combat",
+        "uint16 team_allowance_exchangeable",
+        "uint8 posture",
+        "bool energy_mechanism_activatable",
+        "bool posture_strengthened",
+        "uint8 attack_pose_remain_s",
+        "uint8 defence_pose_remain_s",
+        "uint8 move_pose_remain_s",
+        "uint8 strengthened_attack_remain_s",
+        "uint8 strengthened_defence_remain_s",
+        "uint8 strengthened_move_remain_s"
+      ],
+      "reference_sha256": "97e0736471a0aba0840a00d728e28f8dfc2608106c4e37c8f418719b1d402cb7",
+      "field_compatible": true
+    }
+  },
+  "topic_maps": {
+    "sim": {
+      "nav_goal": "/goal_pose",
+      "nav_status": "/nav_status",
+      "nav_cancel": "/nav_cancel",
+      "odom": "/odom",
+      "cmd_vel": "/cmd_vel",
+      "chassis_mode": "/move_mode",
+      "spin": "/cmd_spin",
+      "fold_cmd": "/gimbal_fold_cmd",
+      "fold_state": "/gimbal_fold_state",
+      "referee": "/referee/summary",
+      "op_cmd": "/sentry/operator_point",
+      "op_cmd_xy": "/referee/operator_cmd",
+      "buy_ammo": "/sentry/buy_ammo",
+      "buy_hp": "/sentry/buy_hp",
+      "buy_revive": "/sentry/buy_revive",
+      "attack_cmd": "/sentry/attack_cmd",
+      "data_source": "/sentry/data_source",
+      "iface_status": "/sentry/iface_status"
+    },
+    "real": {
+      "nav_goal": "/goal_pose",
+      "nav_status": "/nav_status",
+      "nav_cancel": "/nav_cancel",
+      "odom": "/odom",
+      "cmd_vel": "/cmd_vel",
+      "chassis_mode": "/move_mode",
+      "spin": "/cmd_spin",
+      "fold_cmd": "/gimbal_fold_cmd",
+      "fold_state": "/gimbal_fold_state",
+      "referee": "/referee/summary",
+      "op_cmd": "",
+      "op_cmd_xy": "/referee/operator_cmd",
+      "buy_ammo": "/sentry/buy_ammo",
+      "buy_hp": "/sentry/buy_hp",
+      "buy_revive": "/sentry/buy_revive",
+      "attack_cmd": "/sentry/attack_cmd",
+      "data_source": "/sentry/data_source",
+      "iface_status": "/sentry/iface_status"
+    }
+  }
+}

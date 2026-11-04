@@ -1,10 +1,11 @@
-# BBT 点表按我方/敌方语义使用；点 ID、坐标及 region 保留原人工配置。
-# 不根据红蓝阵营镜像、旋转、换点或增加启动门控。
+# BBT 使用 27BT-UC 的裁判场地系和红方基准点表，单位 m。
+# 开局必须人工传 own_team:=red/blue；蓝方绕场心旋转180度，ID和region语义不变。
+# 裁判机器人ID不用于选择/核实开局阵营；额外UC输入话题不影响BBT。
+# 当前暂用裁判地图（map=field，恒等变换）；以后保留 align_map.py 做实测标定。
 # field_to_map: p_map = R(dyaw_deg) * p_field + [dx,dy]。
-# 当前直接使用裁判场地坐标：map=field，已确认恒等变换；另建导航地图时再标定。
-# 操作手点击必须与点表采用同一场地坐标系，不能混用旧 STL 与裁判坐标。
-# 前哨几何坐标和战术点来自 27BT-UC；地图见 docs/referee_map_20261031.png。可关闭 outpost.enable。
-# hp_amount=1 表示一次远程回血请求，恢复量由裁判规则决定。
+# 点表保留UC的39个ID与坐标；defend/harass/hole在BBT中归入patrol。
+# 洞流程：入口停车折叠 -> Nav2一次提交[中心途经点,出口目标] -> 出口停车展开。
+# 中心是途经点，不是独立目标；不得在中心报到达停车。
 enable_tunnel: true
 regions:
 - own_low
@@ -12,12 +13,231 @@ regions:
 - mid
 - enemy_low
 - enemy_high
+# Region cells use the Arena rmuc2027 source terrain polygons (rules.json),
+# converted once into referee field coordinates: [x, 15-y]. mid includes
+# central_* and both road/access surfaces; *_high is the corresponding
+# trapezoid plus slopes. Remaining ground is split at x=14 into *_low.
+# These are routing regions, not an elevation classifier. Multiple simple
+# cells may share a name; a boundary shared by distinct regions is unknown.
+region_geometry:
+- name: own_low
+  polygon:
+  - [14.0, 0.0]
+  - [12.57, 0.0]
+  - [12.57, 1.125]
+  - [13.276089, 1.125]
+  - [14.0, 1.125]
+- name: own_low
+  polygon:
+  - [14.0, 2.08]
+  - [13.276089, 2.08]
+  - [13.276089, 2.09]
+  - [14.0, 2.09]
+- name: own_low
+  polygon:
+  - [14.0, 12.906]
+  - [12.3474, 12.906]
+  - [11.9602, 12.351]
+  - [9.99, 9.5271]
+  - [9.182, 8.369]
+  - [9.182, 6.92]
+  - [9.99, 5.071]
+  - [10.455, 4.007]
+  - [10.455, 3.305]
+  - [10.0174, 2.649]
+  - [9.82, 2.35298]
+  - [9.82, 2.83641]
+  - [8.82, 2.83641]
+  - [8.82, 2.24]
+  - [7.612, 2.24]
+  - [6.835, 3.801]
+  - [5.568, 3.801]
+  - [3.71, 3.801]
+  - [3.71, 2.24]
+  - [0.0, 2.24]
+  - [0.0, 15.0]
+  - [3.13, 15.0]
+  - [3.13, 10.869]
+  - [3.13, 10.3978]
+  - [7.9612, 10.3978]
+  - [10.3873, 13.86]
+  - [12.529, 13.86]
+  - [12.529, 15.0]
+  - [14.0, 15.0]
+  - [14.0, 13.875]
+  - [13.695, 13.875]
+  - [13.695, 12.92]
+  - [14.0, 12.92]
+- name: own_low
+  polygon:
+  - [8.82, 2.24]
+  - [8.82, 2.09]
+  - [6.344, 2.09]
+  - [6.344, 2.24]
+  - [7.612, 2.24]
+- name: own_low
+  polygon:
+  - [3.71, 2.24]
+  - [3.71, 0.0]
+  - [0.0, 0.0]
+  - [0.0, 2.24]
+- name: own_high
+  polygon:
+  - [3.13, 10.3978]
+  - [3.13, 10.869]
+  - [3.13, 15.0]
+  - [12.529, 15.0]
+  - [12.529, 13.86]
+  - [10.3873, 13.86]
+  - [7.9612, 10.3978]
+- name: mid
+  polygon:
+  - [13.276089, 1.125]
+  - [12.57, 1.125]
+  - [12.57, 0.0]
+  - [3.71, 0.0]
+  - [3.71, 3.801]
+  - [5.568, 3.801]
+  - [6.344, 2.24]
+  - [6.344, 2.09]
+  - [8.82, 2.09]
+  - [8.82, 2.83641]
+  - [9.82, 2.83641]
+  - [9.82, 2.35298]
+  - [10.0174, 2.649]
+  - [10.455, 3.305]
+  - [10.455, 4.007]
+  - [9.99, 5.071]
+  - [9.182, 6.92]
+  - [9.182, 8.369]
+  - [9.99, 9.5271]
+  - [11.9602, 12.351]
+  - [12.3474, 12.906]
+  - [18.18, 12.906]
+  - [18.18, 12.91]
+  - [14.723911, 12.91]
+  - [14.723911, 12.92]
+  - [13.695, 12.92]
+  - [13.695, 13.875]
+  - [14.723911, 13.875]
+  - [15.43, 13.875]
+  - [15.43, 15.0]
+  - [24.29, 15.0]
+  - [24.29, 11.199]
+  - [22.432, 11.199]
+  - [21.165, 11.199]
+  - [20.388, 12.76]
+  - [21.656, 12.76]
+  - [21.656, 12.91]
+  - [19.18, 12.91]
+  - [19.18, 12.16359]
+  - [18.18, 12.16359]
+  - [18.18, 12.64702]
+  - [17.9826, 12.351]
+  - [17.545, 11.695]
+  - [17.545, 10.993]
+  - [18.01, 9.929]
+  - [18.818, 8.08]
+  - [18.818, 6.631]
+  - [18.01, 5.4729]
+  - [16.0398, 2.649]
+  - [15.6526, 2.094]
+  - [9.82, 2.094]
+  - [9.82, 2.09]
+  - [13.276089, 2.09]
+  - [13.276089, 2.08]
+  - [14.305, 2.08]
+  - [14.305, 1.125]
+- name: mid
+  polygon:
+  - [9.82, 2.09]
+  - [14.0, 2.09]
+  - [14.0, 2.094]
+  - [9.82, 2.094]
+- name: mid
+  polygon:
+  - [5.568, 3.801]
+  - [6.835, 3.801]
+  - [7.612, 2.24]
+  - [6.344, 2.24]
+- name: enemy_low
+  polygon:
+  - [28.0, 15.0]
+  - [28.0, 0.0]
+  - [24.87, 0.0]
+  - [24.87, 4.131]
+  - [24.87, 4.6022]
+  - [20.0388, 4.6022]
+  - [17.6127, 1.14]
+  - [15.471, 1.14]
+  - [15.471, 0.0]
+  - [14.0, 0.0]
+  - [14.0, 1.125]
+  - [14.305, 1.125]
+  - [14.305, 2.08]
+  - [14.0, 2.08]
+  - [14.0, 2.094]
+  - [15.6526, 2.094]
+  - [16.0398, 2.649]
+  - [18.01, 5.4729]
+  - [18.818, 6.631]
+  - [18.818, 8.08]
+  - [18.01, 9.929]
+  - [17.545, 10.993]
+  - [17.545, 11.695]
+  - [17.9826, 12.351]
+  - [18.18, 12.64702]
+  - [18.18, 12.16359]
+  - [19.18, 12.16359]
+  - [19.18, 12.91]
+  - [21.656, 12.91]
+  - [21.656, 12.76]
+  - [20.388, 12.76]
+  - [21.165, 11.199]
+  - [22.432, 11.199]
+  - [24.29, 11.199]
+  - [24.29, 15.0]
+- name: enemy_low
+  polygon:
+  - [14.0, 15.0]
+  - [15.43, 15.0]
+  - [15.43, 13.875]
+  - [14.723911, 13.875]
+  - [14.0, 13.875]
+- name: enemy_low
+  polygon:
+  - [14.0, 12.92]
+  - [14.723911, 12.92]
+  - [14.723911, 12.91]
+  - [14.0, 12.91]
+- name: mid
+  polygon:
+  - [14.0, 12.906]
+  - [18.18, 12.906]
+  - [18.18, 12.91]
+  - [14.0, 12.91]
+- name: enemy_high
+  polygon:
+  - [15.471, 0.0]
+  - [15.471, 1.14]
+  - [17.6127, 1.14]
+  - [20.0388, 4.6022]
+  - [24.87, 4.6022]
+  - [24.87, 4.131]
+  - [24.87, 0.0]
 start_region: own_low
 field_to_map:
   enabled: true
   dx: 0.0
   dy: 0.0
   dyaw_deg: 0.0
+# 可选：蓝方 own_low 原点/洞中心对应的独立导航 map 标定。
+# 未填写时蓝方兼容旧行为，沿用 field_to_map。
+# blue_field_to_map:
+#   enabled: true
+#   dx: 0.0
+#   dy: 0.0
+#   dyaw_deg: 0.0
 safety:
   hp_home_ratio: 0.3
   hp_resume_ratio: 0.6
@@ -35,11 +255,12 @@ safety:
   tunnel_retry_cooldown_s: 5
   in_tunnel_margin_m: 0.3
   arrive_radius_m: 0.5
+  op_min_hold_s: 20
+  op_combat_clear_s: 10
   fold_stale_ms: 1000
 mode_independent: 1
 outpost:
   enable: true
-  snap_m: 1.5
 auto_buy:
   enable: true
   ammo_min_shots: 30
@@ -48,151 +269,242 @@ auto_buy:
   hp_ratio: 0.4
   hp_amount: 1
   hp_min_coins: 300
-  revive_min_coins: 200
+  revive_enable: true
   cooldown_s: 10
+# 巡逻仅在这些配置点间轮换；完整39点表保留原ID、坐标、region和zone。
+patrol_point_ids: [28, 40, 70, 101]
 points:
-- id: 1
-  x: 25.39
-  y: 13.48
+- id: 100
+  x: 2.61
+  y: 1.52
   zone: home
   region: own_low
-- id: 20
-  x: 12.0
-  y: 4.0
+- id: 3
+  x: 11.37
+  y: 0.66
+  zone: patrol
+  region: mid
+- id: 6
+  x: 11.55
+  y: 1.58
+  zone: patrol
+  region: mid
+- id: 9
+  x: 22.63
+  y: 2.22
+  zone: patrol
+  region: enemy_high
+- id: 11
+  x: 17.24
+  y: 2.37
+  zone: patrol
+  region: enemy_low
+- id: 18
+  x: 21.3
+  y: 2.51
+  zone: patrol
+  region: enemy_high
+- id: 27
+  x: 17.51
+  y: 3.55
+  zone: patrol
+  region: enemy_low
+- id: 28
+  x: 14.73
+  y: 3.61
+  zone: patrol
+  region: mid
+- id: 30
+  x: 13.69
+  y: 3.67
   zone: retake
+  region: mid
+- id: 34
+  x: 7.57
+  y: 4.0
+  zone: patrol
   region: own_low
-- id: 21
+- id: 40
+  x: 15.4
+  y: 4.45
+  zone: patrol
+  region: mid
+- id: 45
+  x: 12.6
+  y: 4.55
+  zone: patrol
+  region: mid
+- id: 47
+  x: 8.39
+  y: 4.68
+  zone: patrol
+  region: own_low
+- id: 51
+  x: 11.78
+  y: 5.25
+  zone: patrol
+  region: mid
+- id: 53
+  x: 8.94
+  y: 5.35
+  zone: patrol
+  region: own_low
+- id: 56
+  x: 5.31
+  y: 5.58
+  zone: patrol
+  region: own_low
+- id: 57
+  x: 4.02
+  y: 5.58
+  zone: patrol
+  region: own_low
+- id: 63
+  x: 1.82
+  y: 5.76
+  zone: patrol
+  region: own_low
+- id: 65
+  x: 7.96
+  y: 6.36
+  zone: patrol
+  region: own_low
+- id: 70
+  x: 16.91
+  y: 7.45
+  zone: patrol
+  region: mid
+- id: 75
+  x: 4.31
+  y: 8.05
+  zone: patrol
+  region: own_low
+- id: 86
+  x: 11.89
+  y: 9.5
+  zone: retake
+  region: mid
+- id: 87
+  x: 5.92
+  y: 9.54
+  zone: patrol
+  region: own_low
+- id: 91
+  x: 2.21
+  y: 9.77
+  zone: patrol
+  region: own_low
+- id: 95
+  x: 19.26
+  y: 9.99
+  zone: patrol
+  region: enemy_low
+- id: 97
+  x: 7.57
+  y: 10.05
+  zone: patrol
+  region: own_low
+- id: 101
+  x: 16.99
+  y: 10.19
+  zone: patrol
+  region: mid
+- id: 103
+  x: 12.71
+  y: 10.2
+  zone: patrol
+  region: mid
+- id: 107
+  x: 20.66
+  y: 10.89
+  zone: patrol
+  region: enemy_low
+- id: 109
   x: 15.69
   y: 10.9
   zone: outpost
   region: mid
-- id: 22
+- id: 110
+  x: 9.99
+  y: 10.91
+  zone: patrol
+  region: own_low
+- id: 114
   x: 13.65
   y: 11.15
   zone: outpost
   region: mid
-- id: 10
-  x: 22.69
-  y: 9.42
+- id: 119
+  x: 6.24
+  y: 11.78
+  zone: patrol
+  region: own_high
+- id: 121
+  x: 10.62
+  y: 11.83
   zone: patrol
   region: own_low
-- id: 11
-  x: 13.27
-  y: 11.39
+- id: 128
+  x: 12.87
+  y: 12.07
   zone: patrol
   region: mid
-- id: 12
-  x: 10.2
-  y: 0.75
+- id: 136
+  x: 10.7
+  y: 12.86
+  zone: patrol
+  region: own_low
+- id: 142
+  x: 7.43
+  y: 13.62
+  zone: patrol
+  region: own_high
+- id: 143
+  x: 5.93
+  y: 13.74
+  zone: patrol
+  region: own_high
+- id: 153
+  x: 17.8
+  y: 14.25
   zone: patrol
   region: mid
-- id: 13
-  x: 5.37
-  y: 12.78
-  zone: patrol
-  region: enemy_high
 tunnels:
 - name: own_road_tunnel
-  center:
-  - 18.68
-  - 12.85
   corners:
-  - - 18.18
-    - 11.5
-  - - 19.18
-    - 11.5
-  - - 19.18
-    - 14.0
-  - - 18.18
-    - 14.0
-  align:
-  - p:
-    - 18.68
-    - 11.5
-    region: own_low
-  - p:
-    - 18.68
-    - 14.0
-    region: mid
-- name: enemy_near_tunnel
-  center:
-  - 12.63
-  - 13.46
-  corners:
-  - - 11.5
-    - 13.08
-  - - 15.5
-    - 13.08
-  - - 15.5
-    - 13.84
-  - - 11.5
-    - 13.84
-  align:
-  - p:
-    - 15.5
-    - 13.46
-    region: mid
-  - p:
-    - 11.5
-    - 13.46
-    region: enemy_low
-- name: enemy_far_tunnel
-  center:
-  - 13.98
-  - 14.44
-  corners:
-  - - 12.5
-    - 13.94
-  - - 15.5
-    - 13.94
-  - - 15.5
-    - 14.94
-  - - 12.5
-    - 14.94
-  align:
-  - p:
-    - 15.5
-    - 14.44
-    region: mid
-  - p:
-    - 12.5
-    - 14.44
-    region: enemy_high
-- name: enemy_road_tunnel
+  - - 9.82
+    - 3.5
+  - - 8.82
+    - 3.5
+  - - 8.82
+    - 1.0
+  - - 9.82
+    - 1.0
   center:
   - 9.32
   - 2.15
-  corners:
-  - - 8.82
-    - 1.0
-  - - 9.82
-    - 1.0
-  - - 9.82
-    - 3.5
-  - - 8.82
-    - 3.5
   align:
   - p:
     - 9.32
     - 3.5
-    region: enemy_low
+    region: own_low
   - p:
     - 9.32
     - 1.0
     region: mid
-- name: own_near_tunnel
+- name: enemy_near_tunnel
+  corners:
+  - - 16.5
+    - 1.92
+  - - 12.5
+    - 1.92
+  - - 12.5
+    - 1.16
+  - - 16.5
+    - 1.16
   center:
   - 15.37
   - 1.54
-  corners:
-  - - 12.5
-    - 1.16
-  - - 16.5
-    - 1.16
-  - - 16.5
-    - 1.92
-  - - 12.5
-    - 1.92
   align:
   - p:
     - 12.5
@@ -201,20 +513,20 @@ tunnels:
   - p:
     - 16.5
     - 1.54
-    region: own_low
-- name: own_far_tunnel
+    region: enemy_low
+- name: enemy_far_tunnel
+  corners:
+  - - 15.5
+    - 1.06
+  - - 12.5
+    - 1.06
+  - - 12.5
+    - 0.06
+  - - 15.5
+    - 0.06
   center:
   - 14.02
   - 0.56
-  corners:
-  - - 12.5
-    - 0.06
-  - - 15.5
-    - 0.06
-  - - 15.5
-    - 1.06
-  - - 12.5
-    - 1.06
   align:
   - p:
     - 12.5
@@ -223,6 +535,72 @@ tunnels:
   - p:
     - 15.5
     - 0.56
+    region: enemy_high
+- name: enemy_road_tunnel
+  corners:
+  - - 19.18
+    - 14.0
+  - - 18.18
+    - 14.0
+  - - 18.18
+    - 11.5
+  - - 19.18
+    - 11.5
+  center:
+  - 18.68
+  - 12.85
+  align:
+  - p:
+    - 18.68
+    - 11.5
+    region: enemy_low
+  - p:
+    - 18.68
+    - 14.0
+    region: mid
+- name: own_near_tunnel
+  corners:
+  - - 15.5
+    - 13.84
+  - - 11.5
+    - 13.84
+  - - 11.5
+    - 13.08
+  - - 15.5
+    - 13.08
+  center:
+  - 12.63
+  - 13.46
+  align:
+  - p:
+    - 15.5
+    - 13.46
+    region: mid
+  - p:
+    - 11.5
+    - 13.46
+    region: own_low
+- name: own_far_tunnel
+  corners:
+  - - 15.5
+    - 14.94
+  - - 12.5
+    - 14.94
+  - - 12.5
+    - 13.94
+  - - 15.5
+    - 13.94
+  center:
+  - 13.98
+  - 14.44
+  align:
+  - p:
+    - 15.5
+    - 14.44
+    region: mid
+  - p:
+    - 12.5
+    - 14.44
     region: own_high
 topics:
   sim:
@@ -264,18 +642,4 @@ topics:
     data_source: /sentry/data_source
     iface_status: /sentry/iface_status
 require_map_alignment: true
-outposts:
-  field_referee:
-    own:
-    - 10.98
-    - 3.6
-    enemy:
-    - 17.02
-    - 11.4
-  tactical_points:
-    outpost_109:
-    - 15.69
-    - 10.9
-    outpost_114:
-    - 13.65
-    - 11.15
+geometry_reference: red

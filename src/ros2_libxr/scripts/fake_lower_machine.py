@@ -4,14 +4,14 @@
 两种用法：
 
 1) 默认用伪终端（pty），自己打印从设备路径，另开终端把桥指过去：
-       python3 fake_lower_machine.py
-       输出 /dev/pts/N → ros2 run ros2_libxr ros2_libxr_node --ros-args -p port:=/dev/pts/N
+       python3 fake_lower_machine.py --own-team red
+       输出 /dev/pts/N → ros2 run ros2_libxr ros2_libxr_node --ros-args -p port:=/dev/pts/N -p own_team:=red
 
 2) 直接用 pty 起桥 + 自己（一条命令看全链路）：
-       python3 fake_lower_machine.py --spawn-bridge
+       python3 fake_lower_machine.py --own-team red --spawn-bridge
 
 3) 灌真实串口（需要 root 或用 socat 造一对）：
-       python3 fake_lower_machine.py --port /dev/ttyUSB0
+       python3 fake_lower_machine.py --own-team red --port /dev/ttyUSB0
 
 CRC 与线格式严格照 LibXR 实现，和 C++ 侧做过逐字节对比。
 """
@@ -142,7 +142,7 @@ class Parser:
 CMD_GAME_STATUS, CMD_ROBOT_HP, CMD_FIELD_EVENT = 0x0001, 0x0003, 0x0101
 CMD_ROBOT_STATUS, CMD_POWER_HEAT, CMD_ROBOT_POS = 0x0201, 0x0202, 0x0203
 CMD_ALLOWANCE, CMD_RFID, CMD_GROUND_POS = 0x0208, 0x0209, 0x020B
-CMD_SENTRY_INFO, CMD_CUSTOM = 0x020D, 0x0311
+CMD_SENTRY_INFO = 0x020D
 
 
 
@@ -166,16 +166,14 @@ CMD_PERIOD = {
     CMD_RFID: 1.0 / 3,
     CMD_GROUND_POS: 1.0,
     CMD_SENTRY_INFO: 1.0,
-    # 0x0311 解波分帧：每 3 s 一批，一批 8 帧连续发，这里用 1/3 s 触发
-    CMD_CUSTOM: 3.0,
 }
 
 
 # 哪些命令走图传链路（USART6, bus=1），其余走常规链路（USART1, bus=0）
-CMD_BUS = {CMD_CUSTOM: 1}
+CMD_BUS = {}
 
 
-def build_round(t: float):
+def build_round(t: float, own_team: str = "red"):
     """造一组自洽的 2027 下行帧。"""
     hp = 200 + int(200 * (0.5 + 0.5 * math.sin(t / 5)))
     frames = [
@@ -186,7 +184,8 @@ def build_round(t: float):
         # 0x0101：8 字节，R 前哨阵地控制状态 = 1（己方临时控制），B = 2（未控制）
         (CMD_FIELD_EVENT, struct.pack("<II", (1 << 28) | (2 << 30) | 1, 0)),
         # 0x0201：17 字节，含 float 初速度上限
-        (CMD_ROBOT_STATUS, struct.pack("<BBHHHHHfB", 7, 3, hp, 400, 40, 200, 80, 30.0, 0b101)),
+        (CMD_ROBOT_STATUS, struct.pack("<BBHHHHHfB", 7 if own_team == "red" else 107,
+                                       3, hp, 400, 40, 200, 80, 30.0, 0b101)),
         # 0x0202：14 字节，前 8 字节保留
         (CMD_POWER_HEAT, struct.pack("<HHfHHH", 0, 0, 0.0, 60, 20, 0)),
         (CMD_ROBOT_POS, struct.pack("<fff", 8.0, 6.0, 90.0)),
@@ -197,14 +196,13 @@ def build_round(t: float):
         # 0x020D：14 字节。脱战(bit0)=0 战斗中，姿态=1 进攻
         (CMD_SENTRY_INFO, struct.pack("<IHQ", 0, (1 << 12) | (0 << 0), 30)),
     ]
-    # 0x0311：分帧的解波数据。模拟"解波成功"：一批 5 帧连续发出。
     return frames
 
 
 # ---------------------------------------------------------------- 主循环
 
 class FakeStm32:
-    def __init__(self, fd, spawn_bridge=False, pts=None, verbose=False):
+    def __init__(self, fd, spawn_bridge=False, pts=None, verbose=False, own_team="red"):
         self.fd = fd
         self.parser = Parser()
         self.ts = 0
@@ -213,11 +211,12 @@ class FakeStm32:
         self.last_move = None
         self.rx_log = {}
         self.bridge = None
+        self.own_team = own_team
         if spawn_bridge:
             self.bridge = subprocess.Popen(
                 ["ros2", "run", "ros2_libxr", "ros2_libxr_node", "--ros-args",
                  "-p", "port:=" + pts, "-p", "publish_raw:=true",
-                 "-p", "radar_origin_x_m:=0.0", "-p", "radar_origin_y_m:=0.0"],
+                 "-p", "own_team:=" + own_team],
                 stdout=None if verbose else subprocess.DEVNULL,
                 stderr=None if verbose else subprocess.DEVNULL)
 
@@ -246,7 +245,7 @@ class FakeStm32:
                 body = payload[8:8 + n]
                 print("[rx] ref_tx cmd=0x%04X len=%d bus=%d data=%s"
                       % (cmd, n, bus, body.hex()), flush=True)
-                if cmd == CMD_CUSTOM:
+                if cmd == 0x0301:
                     act = (int.from_bytes(body[6:10], "little") >> 21) & 0x7 if len(body) >= 10 else 0
                     print("     -> 0x0120 姿态=%d 发弹累计=%d"
                           % (act, (int.from_bytes(body[6:10], "little") >> 2) & 0x7FF), flush=True)
@@ -268,16 +267,14 @@ class FakeStm32:
             t = time.time() - t0
             if t >= seconds:
                 break
-            for cmd, data in build_round(t):
-                if cmd == CMD_CUSTOM:
-                    continue
+            for cmd, data in build_round(t, self.own_team):
                 if t >= nxt[cmd]:
                     nxt[cmd] = t + CMD_PERIOD[cmd]
                     self.seq += 1
                     raw = ref_frame(cmd, data, self.seq)
                     # RefFrameWire: bus, seq, len, tick_ms, raw[128]
                     wire = struct.pack("<BBHI", CMD_BUS.get(cmd, 0), self.seq & 0xFF,
-                                       len(raw), int(t * 1000)) + raw
+                                       len(raw), int(t * 1000)) + raw.ljust(128, b"\0")
                     self.send("ref_frame", wire)
             if t >= nxt_ahrs:
                 nxt_ahrs = t + 0.01
@@ -315,12 +312,14 @@ class FakeStm32:
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--own-team", required=True, choices=("red", "blue"),
+                    help="开局人工指定己方；桥使用同一设置，不核对裁判 ID")
     ap.add_argument("--port", help="写到这个真实串口（默认自建 pty）")
     ap.add_argument("--spawn-bridge", action="store_true",
                     help="自动起 ros2_libxr_node 并在结束时关掉")
     ap.add_argument("--seconds", type=float, default=20.0)
     ap.add_argument("--verbose", action="store_true",
-                    help="把桥的日志直接��到当前终端")
+                    help="把桥的日志直接输出到当前终端")
     args = ap.parse_args()
 
     if args.port:
@@ -334,11 +333,12 @@ def main():
         pts = os.ttyname(slave)
         print("假下位机在 %s" % pts, flush=True)
         if not args.spawn_bridge:
-            print("另开终端：ros2 run ros2_libxr ros2_libxr_node --ros-args -p port:=%s" % pts,
+            print("另开终端：ros2 run ros2_libxr ros2_libxr_node --ros-args -p port:=%s -p own_team:=%s"
+                  % (pts, args.own_team),
                   flush=True)
         time.sleep(1.0)
 
-    FakeStm32(fd, args.spawn_bridge, pts, args.verbose).run(args.seconds)
+    FakeStm32(fd, args.spawn_bridge, pts, args.verbose, args.own_team).run(args.seconds)
 
 
 if __name__ == "__main__":

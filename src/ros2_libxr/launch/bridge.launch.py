@@ -2,7 +2,6 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 import os
 
@@ -14,8 +13,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('port', default_value='/dev/ttyACM0',
                               description='STM32 USB CDC 串口设备'),
-        DeclareLaunchArgument('robot_id', default_value='0',
-                              description='哨兵机器人 ID，0 表示自动识别'),
+        DeclareLaunchArgument('own_team',
+                              description='开局人工指定己方 red 或 blue；不核对裁判 ID'),
         DeclareLaunchArgument('config', default_value=default_config),
         Node(
             package='ros2_libxr',
@@ -26,8 +25,7 @@ def generate_launch_description():
                 LaunchConfiguration('config'),
                 {
                     'port': LaunchConfiguration('port'),
-                    'robot_id': ParameterValue(
-                        LaunchConfiguration('robot_id'), value_type=int),
+                    'own_team': LaunchConfiguration('own_team'),
                 },
             ],
         ),

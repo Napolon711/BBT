@@ -1,12 +1,16 @@
 # ============================================================================
 # 无洞演示场景：enable_tunnel = false —— 这套车不过洞。
 #
-# region 与过洞功能耦合：开关一关，regions 表、每个点的 region 字段、tunnels 段
-# **全部不需要**（本文件就没了这三段）。所有点视为互相直连，任何目标直接发导航；
+# 关闭过洞时洞表不需要。旧的ID点导航可省略region，本演示仍配置一个场内几何，
+# 让任意坐标点击也能校验归属。所有点视为互相直连，目标直接发导航；
 # 血量/弹量回家锁存、操作手指点、受击旋转照常工作。
 # 哪天要过洞了：改成 true 并把 regions / region / tunnels 补回来（参考 corridor_demo.yaml）。
 # ============================================================================
 enable_tunnel: false
+# 可不配置region；这里提供单一区域，使任意坐标指点也有明确场内归属。
+regions: [field]
+region_geometry:
+  - {name: field, polygon: [[0, 4], [20, 4], [20, 6], [0, 6]]}
 
 field_to_map:
   enabled: false
@@ -17,17 +21,19 @@ safety:
   ammo_home_min: 50
   ammo_resume_min: 150
   odom_stale_ms: 1000
+  op_min_hold_s: 20
+  op_combat_clear_s: 10
 
 # 自动购买（决策层自己下单；参数含义与默认值见 decision.yaml）
 auto_buy:
   enable: true
   cooldown_s: 10
 
-points:                  # 没有 region 字段——过洞关着，不需要
-  - {id: 1,  x: 1.0,  y: 5.0, zone: home}
-  - {id: 10, x: 7.0,  y: 5.0, zone: patrol}
-  - {id: 11, x: 13.0, y: 5.0, zone: patrol}
-  - {id: 12, x: 19.0, y: 5.0, zone: patrol}
+points:
+  - {id: 1,  x: 1.0,  y: 5.0, zone: home, region: field}
+  - {id: 10, x: 7.0,  y: 5.0, zone: patrol, region: field}
+  - {id: 11, x: 13.0, y: 5.0, zone: patrol, region: field}
+  - {id: 12, x: 19.0, y: 5.0, zone: patrol, region: field}
 
 topics:
   sim:

@@ -55,9 +55,12 @@ public:
   // ---- 哨兵导航 ----
   // 下发导航目标点，底盘自己走过去（路径规划、对正、绕障都在导航侧）。
   // 参数：x/y — 目标点坐标，单位 m。
-  // 返回：true = 目标已被接受；false = 被拒或没接线。
+  // 返回：true = 请求已提交（话题发布不代表外部接受）；false = 本地拒绝。
   // 副作用：覆盖导航侧现有目标；接受后 nav_state() 变为 kGoalRunning。
   virtual bool nav_set_goal(double x, double y) = 0;
+  // 一次提交途经点和终点。仅最后一个点允许到点停车；中间点必须连续通过。
+  // 没有多点能力时拒绝，禁止退化为逐点停车的 nav_set_goal 循环。
+  virtual bool nav_through_poses(const std::vector<Vec2>& poses) { (void)poses; return false; }
   // 取消当前导航目标。
   // 副作用：nav_state() 回到 kGoalIdle，底盘自己停住。
   virtual void nav_cancel() = 0;
@@ -101,8 +104,9 @@ public:
   virtual RefereeSnapshot referee() = 0;
 
   // ---- 操作手（经裁判系统通道）----
-  // 读最近一条操作手指令。返回：OpCmd；seq == 0 = 没有。
-  // 调用方按 seq 去重——同一条指令只处理一次（决策层只消费"指点"，买类忽略）。
+  // 取下一条新指令；队列型适配器按本地接收顺序pop，seq == 0表示读空。
+  // 决策每tick读到空或已见seq为止；也兼容测试/旧适配器的固定快照。
+  // 同一条只处理一次，决策只消费"指点"，人工买类忽略。
   virtual OpCmd op_cmd() { return OpCmd{}; }
 
   // ---- 购买（决策层自动买的输出口；操作手的买指令不经这里）----
@@ -152,6 +156,8 @@ public:
   double goal_x = 0.0;     // 最近一次导航目标
   double goal_y = 0.0;
   int goal_count = 0;      // nav_set_goal 被调用的累计次数
+  int through_count = 0;
+  std::vector<Vec2> through_poses;
   int cancel_count = 0;    // nav_cancel 被调用的累计次数
   int stop_count = 0;      // base_stop 被调用的累计次数
   int spin_count = 0;      // base_spin 被调用的累计次数（任意角速度）
@@ -182,6 +188,13 @@ public:
     goal = kGoalRunning;
     goal_set_s = time_s;
     return true;
+  }
+  bool nav_through_poses(const std::vector<Vec2>& poses) override
+  {
+    if (poses.empty()) return false;
+    through_poses = poses;
+    ++through_count;
+    return nav_set_goal(poses.back().x, poses.back().y);
   }
   void nav_cancel() override
   {
