@@ -189,17 +189,23 @@ void production_points_clear_finite_tunnel_segments()
   const auto transform_end = transformed.find("\nsafety:\n", transform_begin);
   CHECK(transform_begin != std::string::npos && transform_end != std::string::npos);
   transformed.replace(transform_begin, transform_end-transform_begin,
-      "\nfield_to_map:\n  enabled: true\n  dx: 3.25\n  dy: -4.75\n  dyaw_deg: 37\n");
+      "\nfield_to_map:\n  enabled: true\n  dx: 3.25\n  dy: -4.75\n  dyaw_deg: 37\n"
+      "blue_field_to_map: {enabled: true, dx: -7, dy: 2, dyaw_deg: -30}\n");
   for (const auto& yaml : {original, transformed})
     for (const auto* team : {"red", "blue"})
     {
       auto cfg = load(yaml);
       configure_own_team(cfg, team);
+      const auto expected_map = [&](Vec2 field) {
+        if (std::string(team) == "blue") field = {28-field.x, 15-field.y};
+        return apply_frame_transform(field, cfg.active_field_to_map);
+      };
       CHECK(cfg.points.size() == baseline.points.size());
       for (size_t p = 0; p < cfg.points.size(); ++p)
       {
         CHECK(cfg.points[p].id == baseline.points[p].id);
         CHECK(cfg.points[p].region == baseline.points[p].region);
+        CHECK(dist(cfg.points[p].pos, expected_map(baseline.points[p].pos)) < 1e-9);
         CHECK(!too_close_to_gate(cfg, cfg.points[p].pos));
         for (int from = 0; from < static_cast<int>(cfg.regions.size()); ++from)
           CHECK(point_usable(cfg, from, cfg.points[p]));
@@ -213,6 +219,19 @@ void production_points_clear_finite_tunnel_segments()
           CHECK(std::abs(actual-expected) < 1e-9);
         }
       }
+      for (size_t t = 0; t < cfg.tunnels.size(); ++t)
+      {
+        CHECK(dist(cfg.tunnels[t].center, expected_map(baseline.tunnels[t].center)) < 1e-9);
+        for (size_t e = 0; e < 2; ++e)
+          CHECK(dist(cfg.tunnels[t].align[e], expected_map(baseline.tunnels[t].align[e])) < 1e-9);
+      }
+      DebugPorts ports;
+      ports.op = {1, 4, -1, 7.69, 3.92};
+      PlanState plan;
+      plan.current_region = cfg.start_region;
+      handle_operator(ports, cfg, plan);
+      CHECK(plan.op_active && plan.op_target.region == cfg.start_region);
+      CHECK(dist(plan.op_target.pos, expected_map({7.69, 3.92})) < 1e-9);
       CHECK(nearest_to_tunnel(cfg, "own_road_tunnel").first == 47);
       CHECK(nearest_to_tunnel(cfg, "enemy_road_tunnel").first == 153);
     }

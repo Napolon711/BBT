@@ -98,7 +98,8 @@ if(BUILD_TESTING)
     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/arena/test_support.py)
   add_test(NAME bbt_arena_navigation_test COMMAND ${Python3_EXECUTABLE} -m unittest
     tools.arena.test_bridge tools.test_check_tunnel_suite tools.test_bbt_demo
-    tools.test_tunnel_runner tools.test_acceptance_provenance tools.test_analyze_bbt_run)
+    tools.test_tunnel_runner tools.test_acceptance_provenance tools.test_analyze_bbt_run
+    tools.test_align_map)
   set_tests_properties(bbt_arena_navigation_test PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../.." TIMEOUT 30)
 endif()

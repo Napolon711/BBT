@@ -12,9 +12,11 @@ field_to_map:
   dx: 0.0
   dy: 0.0
   dyaw_deg: 0.0
+# 蓝方若使用独立 own_low 原点 map，另填 blue_field_to_map；否则沿用上面的旧兼容值。
+# blue_field_to_map: {enabled: true, dx: 0.0, dy: 0.0, dyaw_deg: 0.0}
 ```
 
-这份配置暂按 map 与场地系相同运行，单位米。`require_map_alignment: true` 保留，enabled表示选用了这项配置，不是实车标定证明。用户确认裁判点击以红方侧为原点；官方 `0x0303` 段仅列float XY和米制，未单独重述原点。当前BBT点击只做一次 `field_to_map`。蓝方导航map是否仍与固定物理场地系同向、或随出生侧翻转，尚待确认；须在红蓝两种启动方式下点击同一物理点，对照实际map坐标后确定完整变换，不能直接套用战术模板换边规则。
+这份配置暂按 map 与场地系相同运行，单位米。`require_map_alignment: true` 保留，enabled表示选用了这项配置，不是实车标定证明。用户确认裁判点击以红方侧为原点；官方 `0x0303` 段仅列float XY和米制，未单独重述原点。红方点击直接用 `field_to_map`，蓝方点击先按 `(28-x,15-y)` 换边，再用 `blue_field_to_map`；未配置蓝方段时兼容地沿用 `field_to_map`。原点已知时可以单点标定（给 `--dyaw-deg`），否则用两个以上洞中心解旋转和平移。
 
 Arena 内部和 BBT 使用的裁判坐标关系为：
 
@@ -45,9 +47,9 @@ p_map = R(dyaw_deg) * p_field + [dx, dy]
 cp docs/calibration_pairs.csv.example /tmp/bbt_calibration_pairs.csv
 ```
 
-`id` 必须与 `decision.yaml` 中的洞名一致。保留至少 2 个不同的洞中心，建议测量 3 个以上、分布在不同位置；删除未测行，不要留空或填零代替未知值。场地系坐标由工具从 `tunnels[].center` 读取，表中只填导航 map 系坐标。
+洞中心行的 `id` 必须与 `decision.yaml` 中的洞名一致。也可给固定原点等锚点填写 `field_x,field_y`，此时不需要洞名。删除未测行，不要留空或填零代替未知值。至少 2 个分散锚点可解旋转和平移；已知地图朝向时，一个原点锚点配 `--dyaw-deg` 可解平移。蓝方会把 CSV 场地点先按 `(28-x,15-y)` 换边。
 
-可在 RViz 的 map 坐标系中量取洞中心。先确认测到的是同一个物理位置，坐标单位均为米、地图尺度正确。两点只能确定旋转和平移，第三点及额外检查点可以帮助发现错配。重复测同一个洞不能增加独立约束。
+可在 RViz 的 map 坐标系中量取洞中心或指定锚点。先确认测到的是同一个物理位置，坐标单位均为米、地图尺度正确。两点只能确定旋转和平移，第三点及额外检查点可以帮助发现错配。重复测同一个洞不能增加独立约束。
 
 先解算并查看残差：
 
@@ -62,9 +64,13 @@ python3 tools/align_map.py /tmp/bbt_calibration_pairs.csv \
 python3 tools/align_map.py /tmp/bbt_calibration_pairs.csv \
   --config src/bbt_decide/config/decision.yaml --write
 git diff -- src/bbt_decide/config/decision.yaml
+
+# 蓝方：同一份 CSV 的洞 ID 会先换边，再写入 blue_field_to_map
+python3 tools/align_map.py /tmp/bbt_calibration_pairs.csv \
+  --config src/bbt_decide/config/decision.yaml --team blue --write
 ```
 
-写入会设置 `field_to_map.enabled: true`。只有确认两个坐标系重合时，才能采用 `dx=0, dy=0, dyaw_deg=0`。`--scale` 只用于尺度诊断，本配置只支持旋转和平移；写入时不要使用该选项。
+红方写入会设置 `field_to_map.enabled: true`，蓝方写入会设置 `blue_field_to_map.enabled: true`。只有确认对应坐标系重合时，才能采用零平移、零旋转。`--scale` 只用于尺度诊断，本配置只支持旋转和平移；写入时不要使用该选项。
 
 ## 2. 核对点位、区域和位姿输入
 
@@ -78,11 +84,11 @@ git diff -- src/bbt_decide/config/decision.yaml
 | 区域几何 | 已确认的region多边形与实车地图一致；跨region必须按洞连接图通行，可经mid过多个洞 |
 | 洞两端 `align` | 对正点对应声明的区域；出口可能处于洞体边界，核对导航到达容差与实际机构位置 |
 | `/odom` | position 已处于导航 map 系；仅修改 `header.frame_id` 不会变换坐标 |
-| 操作手点击 | 核实0x0303的实测坐标与红蓝map约定；同一物理点应经确认的完整变换一次，不吸附点表；配置几何时须有唯一region归属 |
+| 操作手点击 | 核实0x0303坐标；红方用红方 map 标定，蓝方先换边再用蓝方 map 标定；不吸附点表，且配置几何时须有唯一region归属 |
 
 当前适配层直接使用 `/odom` 的位置数值，不查询 TF。若导航原始里程计在 odom 系，应由定位/导航侧提供 map 系位姿并接到配置的 `topics.real.odom`；同时检查图上的实际位置与变换后的家点、洞口是否吻合。
 
-点位或变换有修改后，重启决策节点重新加载。配置几何在加载时应用一次 `field_to_map`；当前代码对操作手原始坐标也应用一次。若蓝方导航map随出生侧翻转，应统一核对几何、点击及位姿的完整坐标链，避免漏变换或重复旋转；该实机约定尚待确认。
+点位或变换有修改后，重启决策节点重新加载。配置几何和操作手原始坐标都只转换一次：红方使用 `field_to_map`，蓝方先换边再使用 `blue_field_to_map`（缺省时回退到前者）。`/odom` 必须已经处于当前导航 map 系，避免在定位侧再次旋转或平移。
 
 正式配置的 `safety.gate_clear_m: 0.5`只筛选配置点，当前39个点均保留；不套用到人工任意原坐标。洞体内部、非法数值或无法唯一归属的点击静默拒绝且保留原任务。简单地图关闭过洞并合法省略region/几何时，有限XY交导航判断可达性。
 

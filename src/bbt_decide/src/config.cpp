@@ -200,6 +200,16 @@ static bool load_config_impl(const std::string& path, Config& cfg, std::string& 
     read_double(n, "dy", cfg.field_to_map.dy);
     read_double(n, "dyaw_deg", cfg.field_to_map.dyaw_deg);
   }
+  cfg.active_field_to_map = cfg.field_to_map;
+  if (root["blue_field_to_map"])
+  {
+    const auto& n = root["blue_field_to_map"];
+    cfg.field_to_map_blue.enabled = n["enabled"] ? n["enabled"].as<bool>() : true;
+    read_double(n, "dx", cfg.field_to_map_blue.dx);
+    read_double(n, "dy", cfg.field_to_map_blue.dy);
+    read_double(n, "dyaw_deg", cfg.field_to_map_blue.dyaw_deg);
+    cfg.has_field_to_map_blue = true;
+  }
 
   // ---- 阈值（全部可选，缺省用代码里的默认值）----
   if (root["safety"])
@@ -483,26 +493,31 @@ void configure_own_team(Config& cfg, const std::string& team)
     if (cfg.own_team != team) throw std::invalid_argument("own_team 在本次运行中不可修改");
     return;
   }
-  if (cfg.geometry_reference != "none" && cfg.geometry_reference != team)
+  const FrameTransform target_transform =
+      team == "blue" && cfg.has_field_to_map_blue ? cfg.field_to_map_blue : cfg.field_to_map;
+  const bool rotate_field = cfg.geometry_reference != "none" && cfg.geometry_reference != team;
+  const auto to_team_map = [&](Vec2& p) {
+    Vec2 field = inverse_frame_transform(p, cfg.field_to_map);
+    if (rotate_field) field = {28.0 - field.x, 15.0 - field.y};
+    p = apply_frame_transform(field, target_transform);
+    if (!std::isfinite(p.x) || !std::isfinite(p.y))
+      throw std::invalid_argument("换边或地图标定后坐标溢出");
+  };
+  // 配置加载时所有几何先进入红方基准 map；还原到场地系后，再按当前阵营
+  // （蓝方先绕场心旋转）转换到对应导航 map，避免沿用红方 map 原点。
+  if (cfg.field_to_map.enabled || target_transform.enabled || rotate_field)
   {
-    // 加载器已将几何变到 map 系。场地旋转 S(p)=2c-p 与刚体变换 T 满足
-    // T(S(p))=2T(c)-T(p)，避免重复变换或把真实点击也旋转。
-    const Vec2 center = apply_frame_transform({14.0, 7.5}, cfg.field_to_map);
-    const auto rotate = [&center](Vec2& p) {
-      p = {2.0 * center.x - p.x, 2.0 * center.y - p.y};
-      if (!std::isfinite(p.x) || !std::isfinite(p.y))
-        throw std::invalid_argument("换边后坐标溢出");
-    };
-    for (auto& p : cfg.points) rotate(p.pos);
+    for (auto& p : cfg.points) to_team_map(p.pos);
     for (auto& cell : cfg.region_geometry)
-      for (auto& p : cell.polygon) rotate(p);
+      for (auto& p : cell.polygon) to_team_map(p);
     for (auto& t : cfg.tunnels)
     {
-      rotate(t.align[0]); rotate(t.align[1]);
-      if (t.has_center) rotate(t.center);
-      for (auto& p : t.corners) rotate(p);
+      to_team_map(t.align[0]); to_team_map(t.align[1]);
+      if (t.has_center) to_team_map(t.center);
+      for (auto& p : t.corners) to_team_map(p);
     }
   }
+  cfg.active_field_to_map = target_transform;
   cfg.own_team = team;
 }
 

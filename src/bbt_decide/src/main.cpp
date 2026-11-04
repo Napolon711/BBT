@@ -197,10 +197,10 @@ private:
   // 推一拍树 + 目标点变化时打一条日志。
   void tick()
   {
-    if (data_source_ == "real" && cfg_->require_map_alignment && !cfg_->field_to_map.enabled)
+    if (data_source_ == "real" && cfg_->require_map_alignment && !cfg_->active_field_to_map.enabled)
     {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
-                          "等待 field_to_map 标定；确认恒等变换也须显式 enabled=true");
+                          "等待当前阵营的场地到导航 map 标定；确认恒等变换也须显式 enabled=true");
       return;
     }
     try

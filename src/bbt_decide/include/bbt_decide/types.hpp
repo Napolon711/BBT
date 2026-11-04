@@ -18,8 +18,8 @@
 //      入口 = 绑定"车当前区域"的对正点，出口 = 绑定"目标区域"的那个。多洞 BFS 串联；
 //   3) 数据一律从真实 ROS 话题进出（见 RosPorts），仿真数据由 Arena 桥按同一套
 //      话题发进来，没有任何进程内注水通道；
-//   4) 地图对齐：点表按场地图纸系填，field_to_map（旋转 + 平移）在加载时把全部
-//      点搬到导航建图系（tools/align_map.py 解算，与主工作区同款）。
+//   4) 地图对齐：点表按红方基准场地图纸系填，field_to_map（以及可选的
+//      blue_field_to_map）在启动时把当前阵营几何搬到对应导航建图系。
 #pragma once
 
 #include <cmath>
@@ -31,7 +31,7 @@ namespace bbt_decide
 {
 
 // 二维点 / 二维向量。单位 m。不带坐标系信息：点表按场地系（图纸/STL）填，
-// config 加载时经 field_to_map 统一搬到导航地图系，之后全场只有地图系。
+// config 加载时经当前阵营的场地→map 变换统一搬到导航地图系，之后全场只有地图系。
 struct Vec2
 {
   double x = 0.0;  // X 坐标，单位 m
@@ -48,6 +48,18 @@ struct FrameTransform
   double dy = 0.0;        // 平移量 y，单位 m
   double dyaw_deg = 0.0;  // 旋转量，单位度，逆时针为正
 };
+
+// 逆变换：导航 map 系 → 该变换对应的场地系。
+inline Vec2 inverse_frame_transform(const Vec2& p, const FrameTransform& t)
+{
+  if (!t.enabled) return p;
+  const double a = t.dyaw_deg * 3.14159265358979323846 / 180.0;
+  const double c = std::cos(a);
+  const double s = std::sin(a);
+  const double x = p.x - t.dx;
+  const double y = p.y - t.dy;
+  return Vec2{c * x + s * y, -s * x + c * y};
+}
 
 // 把一个点从场地系变换到地图系：先绕原点旋转 dyaw_deg，再平移 (dx, dy)。
 // 参数：p — 场地系点；t — 变换参数。返回：地图系点。纯函数。
@@ -148,7 +160,7 @@ struct RefereeSnapshot
 // 收到也只记下序号忽略；效果从裁判数据里看（血量/弹量涨了就是买到了）。
 // seq 是指令序号（发送侧每条 +1，0 = 无指令）：决策层按它去重，同一条只处理一次。
 // 实车链路（裁判 0x0303 小地图点击）给的是**坐标**而不是点表 id：type=4 时
-// param = -1、x/y = 原始点击坐标；经地图变换后保持原点，由区域几何判区。
+// param = -1、x/y = 红方基准场地坐标；蓝方先绕场心旋转180度，再用蓝方地图标定。
 struct OpCmd
 {
   uint32_t seq = 0;   // 指令序号；0 = 没有指令
@@ -286,7 +298,12 @@ struct Config
   std::vector<PointDef> points;      // 点表：家 + 巡逻点（enable_tunnel=true 时各绑区域）
   std::vector<int> patrol_point_ids; // 可选巡逻环ID顺序；空/未配时沿用全部patrol点表顺序
   std::vector<TunnelDef> tunnels;    // 洞表：每条两个对正点 + 各自服务的区域
-  FrameTransform field_to_map;       // 场地系 → 地图系（align_map.py 解算；加载时生效）
+  FrameTransform field_to_map;       // 红方基准场地系 → 红方 map（兼容旧配置）
+  // 可选的蓝方导航地图标定。缺省时沿用 field_to_map，保持旧配置语义。
+  // field_to_map 仍是红方基准；蓝方几何先按场心换边，再应用这个变换。
+  FrameTransform field_to_map_blue;
+  bool has_field_to_map_blue = false;
+  FrameTransform active_field_to_map; // configure_own_team 选定的当前导航 map 标定
   bool require_map_alignment = false; // 正式地图实车必须显式标定，恒等也要 enabled=true
 
   // ---- 阈值（单位见各字段注释）----

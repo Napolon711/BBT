@@ -51,7 +51,7 @@ BBT 的共享消息定义与本机 UC 快照一致，详见 [UC 接口子集说�
 
 ## 坐标与后续标定
 
-场地配置为 28×15 m，点表采用红方基准场地系。用户确认操作手裁判输入以红方侧为原点，单位米；官方 `0x0303` 段列出 float XY，但未单独重述该原点。当前 BBT 点击只做一次 `field_to_map`；蓝方导航 map 是否仍采用同一物理场地系，及点击是否需随地图变换，尚待现场坐标约定确认。战术模板换边不能直接决定真实点击的处理。当前恒等变换下 `/odom`、过洞 Action 目标与普通 `/goal_pose` 坐标一致。适配层直接读取 `/odom` 的位置，不查询 TF；改 header 不会变换位置。
+场地配置为 28×15 m，点表采用红方基准场地系。操作手裁判点击以红方基准输入；红方直接用 `field_to_map`，蓝方先按 `(28−x, 15−y)` 换边，再用 `blue_field_to_map`。蓝方标定未配置时暂时回退到红方标定，实测后应分别写入红、蓝 map 参数。当前恒等变换下 `/odom`、过洞 Action 目标与普通 `/goal_pose` 坐标一致。适配层直接读取 `/odom` 的位置，不查询 TF；改 header 不会变换位置。
 
 以后另建导航地图时，变换方向为：
 
@@ -65,7 +65,7 @@ python3 tools/align_map.py pairs.csv --config src/bbt_decide/config/decision.yam
 python3 tools/plot_points.py
 ```
 
-CSV 列为 `id,map_x,map_y`，id 为洞名，后两列是洞中心在导航地图中的实测米制坐标，至少两个独立点，建议三个以上。工具不会因为残差超过 5 cm 自动禁止写入，应先核对结果。与 UC 的 `nav_to_field` 方向互逆，不要直接复制参数。开局换边先在场地系旋转战术几何，再输出 map 目标；操作手点击的红蓝完整坐标变换仍待上述导航 map 约定确认。
+CSV 可用洞名从 `tunnels[].center` 取场地坐标，也可直接填写 `field_x,field_y` 指定 `own_low` 原点等锚点；`map_x,map_y` 填导航 map 实测米制坐标。至少两个独立点可解旋转和平移；若原点坐标和 map 朝向已知，一个点配 `--dyaw-deg` 可解平移。用 `--team blue` 会先把标定场地点按 `(28−x,15−y)` 换边，并写入 `blue_field_to_map`。工具不会因为残差超过 5 cm 自动禁止写入，应先核对结果。与 UC 的 `nav_to_field` 方向互逆，不要直接复制参数。
 
 ## 决策与过洞
 

@@ -316,7 +316,12 @@ void apply_operator_command(Ports& ports, const Config& cfg, PlanState& plan,
   else
   {
     target.id = -3;
-    target.pos = apply_frame_transform({command.x, command.y}, cfg.field_to_map);
+    Vec2 field{command.x, command.y};
+    if (cfg.own_team == "blue" && cfg.geometry_reference != "none")
+      field = {28.0 - field.x, 15.0 - field.y};
+    const FrameTransform& map_transform =
+        cfg.own_team.empty() ? cfg.field_to_map : cfg.active_field_to_map;
+    target.pos = apply_frame_transform(field, map_transform);
     target.region = region_for_position(cfg, target.pos);
     target.zone = kZonePatrol;
     if (!std::isfinite(target.pos.x) || !std::isfinite(target.pos.y) ||

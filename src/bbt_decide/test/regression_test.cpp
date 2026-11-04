@@ -115,6 +115,8 @@ static void configuration_validation()
   struct Field { const char* section; const char* name; };
   const Field numeric_fields[] = {
       {"field_to_map", "dx"}, {"field_to_map", "dy"}, {"field_to_map", "dyaw_deg"},
+      {"blue_field_to_map", "dx"}, {"blue_field_to_map", "dy"},
+      {"blue_field_to_map", "dyaw_deg"},
       {"safety", "hp_home_ratio"}, {"safety", "hp_resume_ratio"}, {"safety", "spin_w"},
       {"safety", "odom_stale_ms"}, {"safety", "patrol_dwell_s"}, {"safety", "switch_dwell_s"},
       {"safety", "gate_clear_m"}, {"safety", "op_min_hold_s"}, {"safety", "op_combat_clear_s"},
@@ -159,6 +161,7 @@ static void configuration_validation()
 
   const auto zero = valid_config(minimal_yaml +
       "field_to_map: {enabled: true, dx: -1, dy: -2, dyaw_deg: -90}\n"
+      "blue_field_to_map: {enabled: true, dx: 3, dy: 4, dyaw_deg: 15}\n"
       "safety: {hp_home_ratio: 0, hp_resume_ratio: 0, gate_clear_m: 0, in_tunnel_margin_m: 0, "
       "arrive_radius_m: 0, patrol_dwell_s: 0, switch_dwell_s: 0, nav_retry_s: 0, "
       "spin_w: -1.5, op_min_hold_s: 0, op_combat_clear_s: 0}\n"
@@ -169,6 +172,8 @@ static void configuration_validation()
   CHECK(zero.nav_retry_s == 0 && zero.buy_cooldown_s == 0);
   CHECK(zero.hp_buy_ratio == -1 && zero.spin_w == -1.5);
   CHECK(zero.op_min_hold_s == 0 && zero.op_combat_clear_s == 0);
+  CHECK(zero.has_field_to_map_blue && zero.field_to_map_blue.enabled);
+  CHECK(zero.field_to_map_blue.dx == 3 && zero.field_to_map_blue.dy == 4);
   CHECK(!valid_config(minimal_yaml + "auto_buy: {revive_enable: false}\n").enable_auto_revive);
   CHECK(!valid_config(minimal_yaml + "auto_buy: {revive_min_coins: -1}\n").enable_auto_revive);
   CHECK(valid_config(minimal_yaml + "auto_buy: {revive_min_coins: -1, revive_enable: true}\n").enable_auto_revive);
@@ -583,11 +588,57 @@ static void configured_team_geometry()
   CHECK(rejected);
 }
 
+static void operator_coordinates_use_team_calibration()
+{
+  const auto cfg_text = minimal_yaml +
+      "geometry_reference: red\n"
+      "field_to_map: {enabled: true, dx: 3, dy: -4, dyaw_deg: 90}\n"
+      "blue_field_to_map: {enabled: true, dx: -7, dy: 2, dyaw_deg: -30}\n";
+  for (const auto* team : {"red", "blue"})
+  {
+    Config cfg = valid_config(cfg_text);
+    configure_own_team(cfg, team);
+    cfg.enable_tunnel = false;
+    cfg.region_geometry.clear();
+    DebugPorts ports;
+    ports.op = {1, 4, -1, 7.69, 3.92};
+    PlanState plan;
+    handle_operator(ports, cfg, plan);
+    const Vec2 field = std::string(team) == "blue"
+                           ? Vec2{20.31, 11.08} : Vec2{7.69, 3.92};
+    const Vec2 expected = apply_frame_transform(field, cfg.active_field_to_map);
+    CHECK(plan.op_active);
+    CHECK(std::abs(plan.op_target.pos.x - expected.x) < 1e-8);
+    CHECK(std::abs(plan.op_target.pos.y - expected.y) < 1e-8);
+  }
+
+  // Older YAML keeps using field_to_map for blue until a separate calibration exists.
+  Config legacy = valid_config(minimal_yaml +
+      "field_to_map: {enabled: true, dx: 3, dy: -4, dyaw_deg: 90}\n");
+  configure_own_team(legacy, "blue");
+  CHECK(!legacy.has_field_to_map_blue);
+  CHECK(legacy.active_field_to_map.dx == 3 && legacy.active_field_to_map.dyaw_deg == 90);
+
+  // Custom corridors opt out of the 28x15 field convention entirely.
+  auto custom = corridor();
+  custom.region_geometry = {
+      {"left", {{0, 0}, {9, 0}, {9, 10}, {0, 10}}},
+      {"right", {{11, 0}, {20, 0}, {20, 10}, {11, 10}}}};
+  configure_own_team(custom, "blue");
+  DebugPorts ports;
+  ports.op = {1, 4, -1, 7.69, 3.92};
+  PlanState plan;
+  handle_operator(ports, custom, plan);
+  CHECK(plan.op_active);
+  CHECK(dist(plan.op_target.pos, {7.69, 3.92}) < 1e-8);
+}
+
 int main()
 {
   try
   {
     configured_team_geometry();
+    operator_coordinates_use_team_calibration();
     operator_topic_defaults();
     configuration_validation();
     configuration_structure_and_disabled_features();

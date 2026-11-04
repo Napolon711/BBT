@@ -231,6 +231,13 @@ field_to_map:
   dx: 0.0
   dy: 0.0
   dyaw_deg: 0.0
+# 可选：蓝方 own_low 原点/洞中心对应的独立导航 map 标定。
+# 未填写时蓝方兼容旧行为，沿用 field_to_map。
+# blue_field_to_map:
+#   enabled: true
+#   dx: 0.0
+#   dy: 0.0
+#   dyaw_deg: 0.0
 safety:
   hp_home_ratio: 0.3
   hp_resume_ratio: 0.6
